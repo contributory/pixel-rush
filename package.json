@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "start": "node dist-server/main.js",
+    "start": "node main.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
