@@ -152,5 +152,15 @@ export default async function (req: Request): Promise<Response> {
     return response;
   }
 
-  return await serveFile(url.pathname === "/" ? "/index.html" : url.pathname, import.meta.url);
+  // ---------- static frontend (no bundle — each module served individually) ----------
+  // Serve files from the `frontend/` folder. The browser imports them as
+  // ES modules; serveFile transpiles TSX/TS on the fly, so no build step,
+  // no giant single-file bundle.
+  const p = url.pathname === "/" ? "/frontend/index.html" : url.pathname;
+  if (p.startsWith("/frontend/")) {
+    return await serveFile(p, import.meta.url);
+  }
+
+  // Old /index.html used by Vite dev builds (dist/). Fallback:
+  return new Response("Not found", { status: 404 });
 }
