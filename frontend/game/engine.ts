@@ -811,7 +811,7 @@ export class Engine {
   }
 
   private sendSnap() {
-    this.net?.send({
+    const state = {
       t: "snap",
       score: this.score,
       wave: this.wave,
@@ -824,7 +824,11 @@ export class Engine {
         hp: e.hp, mh: e.maxHp,
       })),
       picks: this.picks.map((p) => ({ i: p.id, tp: p.type, x: Math.round(p.x), y: Math.round(p.y) })),
-    });
+    };
+    // Gửi qua WebRTC data channel nếu có (ưu tiên)
+    if (this.net?.open) {
+      this.net.broadcastState(state);
+    }
   }
 
   private sendShip() {
@@ -1130,7 +1134,10 @@ export class Engine {
     this.shipT += dt;
     if (this.shipT >= 0.05) {
       this.shipT = 0;
-      if (this.net?.open) this.sendShip();
+      if (this.net?.open) {
+        // Gửi ship state qua WebSocket (signaling không cần low-latency)
+        this.sendShip();
+      }
     }
 
     if (isSim) this.checkGameOver();
@@ -1174,6 +1181,7 @@ export class Engine {
       const b: Bullet = { x, y, vx, vy, dmg, r: 4, from: "p", color, homing };
       this.bullets.push(b);
       if (s === this.me && this.net?.open) {
+        // Gửi đạn qua WebSocket (không cần WebRTC vì không critical)
         this.net?.send({ t: "pshot", x, y, vx, vy, dmg, color, homing });
       }
     };
@@ -1221,6 +1229,7 @@ export class Engine {
       e.flash = 0.2;
       if (e.hp <= 0) this.killEnemy(e);
     }
+    // Gửi bombfx qua WebSocket (không cần low-latency)
     this.net?.send({ t: "bombfx", x, y });
     this.localBombFx(x, y);
   }
@@ -1296,6 +1305,7 @@ export class Engine {
     };
     this.bullets.push(b);
     if (this.net?.open && this.role !== "guest") {
+      // Đạn địch được gửi trong snapshot qua WebRTC, đây chỉ là backup qua WebSocket
       this.net.send({ t: "eshot", x: b.x, y: b.y, vx: b.vx, vy: b.vy, r, color });
     }
     audio.eshoot();
@@ -1400,6 +1410,7 @@ export class Engine {
                 dmg: 1, r: 6, from: "e", color: "#ffd23f",
               };
               this.bullets.push(b);
+              // Đạn địch được gửi trong snapshot qua WebRTC
               if (this.net?.open) this.net.send({ t: "eshot", x: b.x, y: b.y, vx: b.vx, vy: b.vy, r: 6, color: "#ffd23f" });
             }
             audio.eshoot();
@@ -1418,6 +1429,7 @@ export class Engine {
                   dmg: 1, r: 5, from: "e", color: "#ff5c8a",
                 };
                 this.bullets.push(b);
+                // Đạn địch được gửi trong snapshot qua WebRTC
                 if (this.net?.open) this.net.send({ t: "eshot", x: b.x, y: b.y, vx: b.vx, vy: b.vy, r: 5, color: "#ff5c8a" });
               }
               audio.eshoot();
