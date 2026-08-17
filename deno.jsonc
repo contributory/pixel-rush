@@ -1,0 +1,16 @@
+{
+  // Deno-first entry points. One Deno process serves the frontend + the
+  // /ws multiplayer relay on a single port (default 8000).
+  "tasks": {
+    "dev": "deno run -A --watch server/main.ts --dev",
+    "build": "deno run -A npm:vite build",
+    "start": "deno run -A server/main.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  // The only Node-flavoured server file; keep type-checking lenient.
+  "compilerOptions": {
+    "lib": ["deno.ns", "dom", "es2022"],
+    "types": []
+  },
+  "exclude": ["dist", "node_modules", "src"]
+}
