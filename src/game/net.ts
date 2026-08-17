@@ -28,9 +28,7 @@ export function httpBase(wsUrl: string): string {
  */
 export function defaultWsUrl(): string {
   const proto = window.location.protocol === "https:" ? "wss://" : "ws://";
-  const host = window.location.hostname;
-  if (window.location.port === "8000") return `${proto}${window.location.host}`;
-  return `${proto}${host}:8000`;
+  return `${proto}${window.location.host}/ws`;
 }
 
 /** Ask the server for the list of open rooms. Throws when unreachable. */
