@@ -6,20 +6,19 @@
  * Uses SQLite for persistent room and player state.
  */
 
-import { serveFile } from "https://esm.town/v/std/http/file.ts";
-import { Database } from "https://esm.town/v/std/sqlite/db.ts";
+import { serveFile } from "https://esm.town/v/std/utils@85-main/index.ts";
+import { sqlite } from "https://esm.town/v/std/sqlite/main.ts";
 
 const MAX_PLAYERS = 4;
 
-// Initialize Database
-const db = new Database();
-db.exec(`
+// Initialize tables (idempotent — safe to run on every invocation)
+await sqlite.execute(`
   CREATE TABLE IF NOT EXISTS rooms_metadata (
     room_code TEXT PRIMARY KEY, 
     status TEXT DEFAULT 'lobby'
   )
 `);
-db.exec(`
+await sqlite.execute(`
   CREATE TABLE IF NOT EXISTS players (
     id TEXT PRIMARY KEY, 
     room_code TEXT, 
@@ -90,19 +89,23 @@ export default async function handler(req: Request): Promise<Response> {
   // ---------- room directory API ----------
   if (url.pathname === "/rooms") {
     try {
-      const rooms = db.exec("SELECT room_code, status FROM rooms_metadata", { returnValue: "resultRows" }) || [];
-      const result = rooms.map((r: any[]) => {
-        const roomCode = r[0];
-        const status = r[1];
-        const pilots = db.exec("SELECT id, name, color FROM players WHERE room_code = ?", { params: [roomCode], returnValue: "resultRows" }) || [];
-        return {
-          room: roomCode,
+      const roomsRes = await sqlite.execute("SELECT room_code, status FROM rooms_metadata");
+      const rooms = roomsRes.rows as { room_code: string; status: string | null }[];
+      const result: { room: string; players: number; max: number; status: string; pilots: { id: string; name: string; color: string }[] }[] = [];
+      for (const r of rooms) {
+        const pilotsRes = await sqlite.execute({
+          sql: "SELECT id, name, color FROM players WHERE room_code = ?",
+          args: [r.room_code],
+        });
+        const pilots = pilotsRes.rows as { id: string; name: string; color: string }[];
+        result.push({
+          room: r.room_code,
           players: pilots.length,
           max: MAX_PLAYERS,
-          status: status || "lobby",
-          pilots: pilots.map((p: any[]) => pub({ id: p[0], name: p[1], color: p[2] })),
-        };
-      });
+          status: r.status || "lobby",
+          pilots: pilots.map((p) => pub({ id: p.id, name: p.name, color: p.color })),
+        });
+      }
       return json({ maxPlayers: MAX_PLAYERS, rooms: result });
     } catch (e) {
       console.error("Rooms endpoint error:", e);
@@ -120,14 +123,19 @@ export default async function handler(req: Request): Promise<Response> {
     const room = (url.searchParams.get("room") ?? "default").trim().toUpperCase().slice(0, 16) || "default";
 
     // Count current players in room
-    const countResult = db.exec("SELECT COUNT(*) FROM players WHERE room_code = ?", { params: [room], returnValue: "resultRows" }) || [];
-    const count = (countResult[0]?.[0] as number) || 0;
+    const countRes = await sqlite.execute({
+      sql: "SELECT COUNT(*) AS count FROM players WHERE room_code = ?",
+      args: [room],
+    });
+    const count = (countRes.rows[0] as { count: number } | undefined)?.count ?? 0;
 
     if (count >= MAX_PLAYERS) {
       return json({ error: "room-full", room, max: MAX_PLAYERS }, 403);
     }
 
     // Upgrade to WebSocket using Val Town's native API
+    // Val Town's native WebSocket upgrade endpoint; `response.webSocket` is
+    // a runtime extension not present on the standard `Response` type.
     const { socket, response } = await fetch("https://websocket.val.town/", {
       method: "POST",
       headers: {
@@ -136,7 +144,7 @@ export default async function handler(req: Request): Promise<Response> {
         "Sec-WebSocket-Key": crypto.randomUUID().replace(/-/g, "").slice(0, 24),
         "Sec-WebSocket-Version": "13",
       },
-    }).then(r => r.webSocket ? { socket: r.webSocket, response: new Response() } : Promise.reject("WS upgrade failed"));
+    }).then((r: any) => r.webSocket ? { socket: r.webSocket, response: new Response() } : Promise.reject("WS upgrade failed"));
 
     const id = `p-${crypto.randomUUID().slice(0, 8)}`;
     const isHost = count === 0;
@@ -144,7 +152,7 @@ export default async function handler(req: Request): Promise<Response> {
     // Initialize client info
     const clientInfo: ClientInfo = { id, name: "PILOT", color: "#00f0ff", room, isHost };
 
-    socket.addEventListener("open", () => {
+    socket.addEventListener("open", async () => {
       // Store connection
       clients.set(id, { ws: socket, info: clientInfo });
       
@@ -156,19 +164,24 @@ export default async function handler(req: Request): Promise<Response> {
 
       // Create room metadata if host
       if (isHost) {
-        db.exec("INSERT OR IGNORE INTO rooms_metadata (room_code, status) VALUES (?, ?)", { params: [room, "lobby"] });
+        await sqlite.execute({
+          sql: "INSERT OR IGNORE INTO rooms_metadata (room_code, status) VALUES (?, ?)",
+          args: [room, "lobby"],
+        });
       }
 
       // Insert player into database
-      db.exec("INSERT INTO players (id, room_code, name, color, is_host) VALUES (?, ?, ?, ?, ?)", {
-        params: [id, room, clientInfo.name, clientInfo.color, isHost ? 1 : 0]
+      await sqlite.execute({
+        sql: "INSERT INTO players (id, room_code, name, color, is_host) VALUES (?, ?, ?, ?, ?)",
+        args: [id, room, clientInfo.name, clientInfo.color, isHost ? 1 : 0],
       });
 
       // Get existing peers
-      const peers = db.exec("SELECT id, name, color FROM players WHERE room_code = ? AND id != ?", {
-        params: [room, id],
-        returnValue: "resultRows"
-      }) || [];
+      const peersRes = await sqlite.execute({
+        sql: "SELECT id, name, color FROM players WHERE room_code = ? AND id != ?",
+        args: [room, id],
+      });
+      const peers = peersRes.rows as { id: string; name: string; color: string }[];
 
       send(socket, {
         t: "welcome",
@@ -176,13 +189,13 @@ export default async function handler(req: Request): Promise<Response> {
         room,
         youHost: isHost,
         maxPlayers: MAX_PLAYERS,
-        peers: peers.map((p: any[]) => pub({ id: p[0], name: p[1], color: p[2] })),
+        peers: peers.map((p) => pub({ id: p.id, name: p.name, color: p.color })),
       });
 
       console.log(`[+] ${id} joined "${room}" (${isHost ? "HOST" : "guest"}) — ${count + 1}/${MAX_PLAYERS} pilots`);
     });
 
-    socket.addEventListener("message", (ev: any) => {
+    socket.addEventListener("message", async (ev: any) => {
       let msg: Record<string, unknown>;
       try {
         msg = JSON.parse(String(ev.data));
@@ -199,8 +212,9 @@ export default async function handler(req: Request): Promise<Response> {
         client.info.name = name;
         client.info.color = color;
         
-        db.exec("UPDATE players SET name = ?, color = ? WHERE id = ?", {
-          params: [name, color, id]
+        await sqlite.execute({
+          sql: "UPDATE players SET name = ?, color = ? WHERE id = ?",
+          args: [name, color, id],
         });
         
         broadcastToRoom(room, { t: "peer-join", id, name, color }, id);
@@ -210,16 +224,22 @@ export default async function handler(req: Request): Promise<Response> {
 
       // Track match state
       if (msg.t === "start") {
-        db.exec("UPDATE rooms_metadata SET status = ? WHERE room_code = ?", { params: ["battle", room] });
+        await sqlite.execute({
+          sql: "UPDATE rooms_metadata SET status = ? WHERE room_code = ?",
+          args: ["battle", room],
+        });
       } else if (msg.t === "lobby") {
-        db.exec("UPDATE rooms_metadata SET status = ? WHERE room_code = ?", { params: ["lobby", room] });
+        await sqlite.execute({
+          sql: "UPDATE rooms_metadata SET status = ? WHERE room_code = ?",
+          args: ["lobby", room],
+        });
       }
 
       // Relay message to room
       broadcastToRoom(room, { ...msg, from: id }, id);
     });
 
-    const cleanup = () => {
+    const cleanup = async () => {
       const client = clients.get(id);
       if (!client) return;
 
@@ -235,21 +255,22 @@ export default async function handler(req: Request): Promise<Response> {
       }
 
       // Remove player from database
-      db.exec("DELETE FROM players WHERE id = ?", { params: [id] });
+      await sqlite.execute({ sql: "DELETE FROM players WHERE id = ?", args: [id] });
 
       // Check if room is empty
-      const remaining = db.exec("SELECT id FROM players WHERE room_code = ? ORDER BY is_host DESC", {
-        params: [room],
-        returnValue: "resultRows"
-      }) || [];
+      const remainingRes = await sqlite.execute({
+        sql: "SELECT id FROM players WHERE room_code = ? ORDER BY is_host DESC",
+        args: [room],
+      });
+      const remaining = remainingRes.rows as { id: string }[];
 
       if (remaining.length === 0) {
-        db.exec("DELETE FROM rooms_metadata WHERE room_code = ?", { params: [room] });
+        await sqlite.execute({ sql: "DELETE FROM rooms_metadata WHERE room_code = ?", args: [room] });
         console.log(`[-] ${id} left "${room}" — room deleted`);
       } else if (wasHost) {
         // Promote new host
-        const newHostId = remaining[0][0] as string;
-        db.exec("UPDATE players SET is_host = 1 WHERE id = ?", { params: [newHostId] });
+        const newHostId = remaining[0].id;
+        await sqlite.execute({ sql: "UPDATE players SET is_host = 1 WHERE id = ?", args: [newHostId] });
         const newHostClient = clients.get(newHostId);
         if (newHostClient) {
           newHostClient.info.isHost = true;
