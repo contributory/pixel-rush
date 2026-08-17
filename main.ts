@@ -21,6 +21,7 @@
 
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
+import { serveStatic } from "@hono/node-server/serve-static";
 import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +33,7 @@ const MAX_PLAYERS = 2;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = join(__dirname, "dist");
+const INDEX_HTML = join(DIST_DIR, "index.html");
 
 interface Client {
   id: string;
@@ -66,6 +68,28 @@ const broadcast = (room: Client[], obj: unknown, except?: string) => {
 };
 
 const app = new Hono();
+
+// Serve static files from dist/ in production, or index.html in dev for Vite
+if (!DEV) {
+  app.use(
+    "/*",
+    serveStatic({
+      root: DIST_DIR,
+      rewriteRequestPath: (path) => {
+        if (path === "/") return "/index.html";
+        return path;
+      },
+    })
+  );
+} else {
+  // In dev mode, serve index.html from dist if it exists, otherwise proxy to Vite
+  app.get("/", (c) => {
+    if (existsSync(INDEX_HTML)) {
+      return c.html(readFileSync(INDEX_HTML, "utf-8"));
+    }
+    return c.text("Run 'npm run build' first or start Vite dev server separately", 503);
+  });
+}
 
 app.use("*", async (c, next) => {
   c.header("access-control-allow-origin", "*");

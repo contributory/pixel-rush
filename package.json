@@ -3,10 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "deno task dev",
-    "build": "deno task build",
-    "start": "deno task start",
-    "typecheck": "deno task typecheck"
+    "dev": "vite",
+    "build": "vite build",
+    "start": "node dist-server/main.js",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.1.0",
