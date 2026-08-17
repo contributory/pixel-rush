@@ -6,9 +6,9 @@ import {
   type NetInfo,
   type OverStats,
   type Phase,
-} from "./game/engine";
-import { audio, type BgmSource } from "./game/audio";
-import { defaultWsUrl, fetchRooms, type RoomInfo } from "./game/net";
+} from "./game/engine.ts";
+import { audio, type BgmSource } from "./game/audio.ts";
+import { defaultWsUrl, fetchRooms, type RoomInfo } from "./game/net.ts";
 
 /* ================= SVG icons (no emoji) ================= */
 

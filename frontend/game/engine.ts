@@ -5,8 +5,8 @@
    khách gửi input/bullets và nội suy địch từ snapshot.
    ============================================================ */
 
-import { audio } from "./audio";
-import { NetClient, type NetMsg, type PeerInfo } from "./net";
+import { audio } from "./audio.ts";
+import { NetClient, type NetMsg, type PeerInfo } from "./net.ts";
 
 export type Phase = "menu" | "connecting" | "playing" | "paused" | "gameover";
 export type Role = "solo" | "host" | "guest";

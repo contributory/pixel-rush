@@ -4,3 +4,18 @@
 .DS_Store
 node_modules
 vendor
+
+# bundle quá lớn — chính là thứ làm push fail trước đây
+dist
+
+# chỉ dùng cho dev local — Val Town serve frontend/ thay thế
+src
+main.ts
+scripts
+package.json
+package-lock.json
+deno.json
+deno.jsonc
+tsconfig.json
+vite.config.js
+index.html
