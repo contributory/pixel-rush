@@ -25,6 +25,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Server as HttpServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 
 const PORT = Number(process.env.PORT ?? 8000);
@@ -125,8 +126,105 @@ app.get("/status", (c) => {
   });
 });
 
-// Start server with Hono + WebSocket
-serve(
+// ── WebSocket relay (co-op sync + WebRTC signaling) ─────────────────────────
+// Lives on the same HTTP server: a `noServer` WebSocketServer is wired through
+// the node server's `upgrade` event, so `/ws?room=CODE` works alongside the
+// Hono HTTP routes above. The relay:
+//   • sends a `welcome` to each new pilot (id / room / youHost / peers)
+//   • announces `peer-join` / `peer-leave` to the rest of the room
+//   • promotes the first remaining pilot to `host` when the host leaves
+//   • forwards every other message (start/snap/ship/pshot/eshot/over + WebRTC
+//     offer·answer·ice) to the other pilots, tagged with the sender's id.
+const wss = new WebSocketServer({ noServer: true });
+
+wss.on("connection", (ws, req) => {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const room = url.searchParams.get("room")?.trim().toUpperCase() || "default";
+  const id = `p${++seq}`;
+  const client: Client = { id, ws, room, name: "Pilot", color: "#888" };
+
+  let list = rooms.get(room);
+  if (!list) {
+    list = [];
+    rooms.set(room, list);
+    roomStatus.set(room, "lobby");
+  }
+
+  // Room is full — refuse politely.
+  if (list.length >= MAX_PLAYERS) {
+    send(ws, { t: "error", msg: "Room is full" });
+    ws.close(4001, "room full");
+    return;
+  }
+
+  // First joiner becomes HOST. Welcome with the CURRENT members (excludes the
+  // newcomer, who learns about them here and then announces itself via a
+  // `join` message that we relay as `peer-join`).
+  const youHost = list.length === 0;
+  send(ws, {
+    t: "welcome",
+    id,
+    room,
+    youHost,
+    maxPlayers: MAX_PLAYERS,
+    peers: list.map(pub),
+  });
+  list.push(client);
+
+  ws.on("message", (data) => {
+    let m: Record<string, unknown>;
+    try {
+      m = JSON.parse(String(data)) as Record<string, unknown>;
+    } catch {
+      return; // ignore non-JSON frames
+    }
+    const t = String(m.t ?? "");
+
+    if (t === "join") {
+      // The client announces itself: record name/color, tell the room.
+      client.name = typeof m.name === "string" ? m.name : client.name;
+      client.color = typeof m.color === "string" ? m.color : client.color;
+      broadcast(
+        list,
+        { t: "peer-join", from: client.id, id: client.id, name: client.name, color: client.color },
+        client.id
+      );
+      return;
+    }
+
+    if (t === "bye") {
+      ws.close(1000, "bye");
+      return;
+    }
+
+    if (t === "start") roomStatus.set(room, "battle");
+    else if (t === "lobby") roomStatus.set(room, "lobby");
+
+    // Everything else is forwarded to the other pilots, tagged with the sender.
+    m.from = client.id;
+    broadcast(list, m, client.id);
+  });
+
+  ws.on("close", () => {
+    const idx = list.indexOf(client);
+    if (idx !== -1) list.splice(idx, 1);
+    broadcast(list, { t: "peer-leave", id: client.id });
+    if (list.length === 0) {
+      rooms.delete(room);
+      roomStatus.delete(room);
+    } else {
+      // The first remaining pilot takes over as HOST.
+      broadcast(list, { t: "host", id: list[0].id });
+    }
+  });
+
+  ws.on("error", () => {
+    /* socket errors surface through 'close' */
+  });
+});
+
+// Start the HTTP server, then attach WebSocket upgrade handling to it.
+const server = serve(
   {
     fetch: app.fetch,
     port: PORT,
@@ -137,6 +235,13 @@ serve(
     console.log(`  Game (UI):   http://localhost:${info.port}/`);
     console.log(`  Rooms (API): http://localhost:${info.port}/rooms`);
     console.log(`  Status:      http://localhost:${info.port}/status`);
+    console.log(`  Relay (WS):  ws://localhost:${info.port}/ws?room=CODE`);
     console.log(`  Max pilots:  ${MAX_PLAYERS} per room\n`);
   }
 );
+
+(server as HttpServer).on("upgrade", (req, socket, head) => {
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    wss.emit("connection", ws, req);
+  });
+});
