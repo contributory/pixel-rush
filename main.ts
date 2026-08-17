@@ -69,27 +69,28 @@ const broadcast = (room: Client[], obj: unknown, except?: string) => {
 
 const app = new Hono();
 
-// Serve static files from dist/ in production, or index.html in dev for Vite
-if (!DEV) {
-  app.use(
-    "/*",
-    serveStatic({
-      root: DIST_DIR,
-      rewriteRequestPath: (path) => {
-        if (path === "/") return "/index.html";
-        return path;
-      },
-    })
-  );
-} else {
-  // In dev mode, serve index.html from dist if it exists, otherwise proxy to Vite
-  app.get("/", (c) => {
-    if (existsSync(INDEX_HTML)) {
-      return c.html(readFileSync(INDEX_HTML, "utf-8"));
-    }
-    return c.text("Run 'npm run build' first or start Vite dev server separately", 503);
-  });
-}
+// Serve the built frontend from dist/ in BOTH dev and prod.
+// serveStatic falls through to the next handler when a file is missing,
+// so /rooms, /status and the dev "/" fallback below still work.
+app.use(
+  "/*",
+  serveStatic({
+    root: DIST_DIR,
+    rewriteRequestPath: (path) => {
+      if (path === "/") return "/index.html";
+      return path;
+    },
+  })
+);
+
+// Dev fallback: if dist/ hasn't been built yet, give a helpful message.
+// For live reload during development, run `vite` on :5173 instead.
+app.get("/", (c) => {
+  if (existsSync(INDEX_HTML)) {
+    return c.html(readFileSync(INDEX_HTML, "utf-8"));
+  }
+  return c.text("Run 'npm run build' first or start Vite dev server separately", 503);
+});
 
 app.use("*", async (c, next) => {
   c.header("access-control-allow-origin", "*");
