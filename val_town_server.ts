@@ -9,7 +9,7 @@
 import { serveFile } from "https://esm.town/v/std/utils@85-main/index.ts";
 import { sqlite } from "https://esm.town/v/std/sqlite/main.ts";
 
-const MAX_PLAYERS = 4;
+const MAX_PLAYERS = 2;
 
 // Initialize tables (idempotent — safe to run on every invocation)
 await sqlite.execute(`
@@ -235,7 +235,13 @@ export default async function handler(req: Request): Promise<Response> {
         });
       }
 
-      // Relay message to room
+      // Relay signaling messages for WebRTC (offer, answer, ice-candidate)
+      if (msg.t === "offer" || msg.t === "answer" || msg.t === "ice-candidate") {
+        broadcastToRoom(room, { ...msg, from: id }, id);
+        return;
+      }
+
+      // Relay other game messages to room
       broadcastToRoom(room, { ...msg, from: id }, id);
     });
 

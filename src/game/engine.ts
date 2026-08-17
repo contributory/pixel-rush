@@ -811,7 +811,7 @@ export class Engine {
   }
 
   private sendSnap() {
-    this.net?.send({
+    const state = {
       t: "snap",
       score: this.score,
       wave: this.wave,
@@ -824,7 +824,11 @@ export class Engine {
         hp: e.hp, mh: e.maxHp,
       })),
       picks: this.picks.map((p) => ({ i: p.id, tp: p.type, x: Math.round(p.x), y: Math.round(p.y) })),
-    });
+    };
+    // Gửi qua WebRTC data channel nếu có (ưu tiên)
+    if (this.net?.open) {
+      this.net.broadcastState(state);
+    }
   }
 
   private sendShip() {
@@ -1130,7 +1134,10 @@ export class Engine {
     this.shipT += dt;
     if (this.shipT >= 0.05) {
       this.shipT = 0;
-      if (this.net?.open) this.sendShip();
+      if (this.net?.open) {
+        // Gửi ship state qua WebSocket (signaling không cần low-latency)
+        this.sendShip();
+      }
     }
 
     if (isSim) this.checkGameOver();

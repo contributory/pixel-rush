@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 
 const PORT = Number(Deno.env.get("PORT") ?? 8000);
 const DEV = Deno.args.includes("--dev");
-const MAX_PLAYERS = 4;
+const MAX_PLAYERS = 2;
 
 interface Client {
   id: string;

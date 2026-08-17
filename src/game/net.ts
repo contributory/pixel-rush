@@ -49,13 +49,18 @@ export class NetClient {
   id = "";
   youHost = false;
   room = "";
-  maxPlayers = 4;
+  maxPlayers = 2;
   peers: PeerInfo[] = [];
   onMsg: ((m: NetMsg) => void) | null = null;
   onPeers: ((peers: PeerInfo[]) => void) | null = null;
   onClose: (() => void) | null = null;
   private ws: WebSocket | null = null;
   private closedByMe = false;
+
+  // WebRTC
+  private pc: RTCPeerConnection | null = null;
+  private dataChannel: RTCDataChannel | null = null;
+  private pendingCandidates: RTCIceCandidateInit[] = [];
 
   get open(): boolean {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
@@ -82,7 +87,7 @@ export class NetClient {
         }
       }, 7000);
 
-      ws.onmessage = (ev) => {
+      ws.onmessage = async (ev) => {
         let m: NetMsg;
         try {
           m = JSON.parse(String(ev.data)) as NetMsg;
@@ -93,7 +98,7 @@ export class NetClient {
           this.id = String(m.id ?? "");
           this.youHost = !!m.youHost;
           this.room = String(m.room ?? "");
-          this.maxPlayers = Number(m.maxPlayers ?? 4);
+          this.maxPlayers = Number(m.maxPlayers ?? 2);
           this.peers = (m.peers as PeerInfo[]) ?? [];
           ws.send(JSON.stringify({ t: "join", name, color: colorFor(this.peers) }));
           window.clearTimeout(timer);
@@ -102,8 +107,26 @@ export class NetClient {
             resolve();
           }
           this.onPeers?.([...this.peers]);
+          
+          // Setup WebRTC after connection
+          this.setupWebRTC();
           return;
         }
+        
+        // WebRTC Signaling messages
+        if (m.t === "offer") {
+          await this.handleOffer(m.offer as RTCSessionDescriptionInit);
+          return;
+        }
+        if (m.t === "answer") {
+          await this.handleAnswer(m.answer as RTCSessionDescriptionInit);
+          return;
+        }
+        if (m.t === "ice-candidate") {
+          await this.handleIceCandidate(m.candidate as RTCIceCandidateInit);
+          return;
+        }
+        
         if (m.t === "peer-join") {
           this.peers = [
             ...this.peers,
@@ -137,6 +160,106 @@ export class NetClient {
     });
   }
 
+  // --- WebRTC Methods ---
+
+  private async setupWebRTC() {
+    const iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
+    this.pc = new RTCPeerConnection({ iceServers });
+
+    this.pc.onicecandidate = (e) => {
+      if (e.candidate && this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({
+          t: "ice-candidate",
+          candidate: e.candidate
+        }));
+      }
+    };
+
+    if (this.youHost) {
+      // Host creates data channel
+      this.dataChannel = this.pc.createDataChannel("game");
+      this.setupDataChannelHandlers();
+      
+      const offer = await this.pc.createOffer();
+      await this.pc.setLocalDescription(offer);
+      
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({
+          t: "offer",
+          offer: this.pc.localDescription
+        }));
+      }
+    } else {
+      // Guest receives data channel
+      this.pc.ondatachannel = (e) => {
+        this.dataChannel = e.channel;
+        this.setupDataChannelHandlers();
+      };
+    }
+  }
+
+  private setupDataChannelHandlers() {
+    if (!this.dataChannel) return;
+
+    this.dataChannel.onopen = () => {
+      console.log("WebRTC Data Channel Open");
+      this.pendingCandidates = [];
+    };
+
+    this.dataChannel.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        // Forward to onMsg handler
+        this.onMsg?.(msg);
+      } catch (err) {
+        console.error("Failed to parse data channel message", err);
+      }
+    };
+  }
+
+  private async handleOffer(offer: RTCSessionDescriptionInit) {
+    if (!this.pc) return;
+    await this.pc.setRemoteDescription(new RTCSessionDescription(offer));
+    const answer = await this.pc.createAnswer();
+    await this.pc.setLocalDescription(answer);
+
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({
+        t: "answer",
+        answer: this.pc.localDescription
+      }));
+    }
+  }
+
+  private async handleAnswer(answer: RTCSessionDescriptionInit) {
+    if (!this.pc) return;
+    await this.pc.setRemoteDescription(new RTCSessionDescription(answer));
+    
+    // Add pending candidates
+    for (const candidate of this.pendingCandidates) {
+      await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
+    }
+  }
+
+  private async handleIceCandidate(candidate: RTCIceCandidateInit) {
+    if (!this.pc) return;
+
+    if (this.pc.remoteDescription) {
+      await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
+    } else {
+      this.pendingCandidates.push(candidate);
+    }
+  }
+
+  // Send game state via WebRTC (Host only)
+  broadcastState(state: Record<string, unknown>) {
+    if (this.dataChannel && this.dataChannel.readyState === "open") {
+      this.dataChannel.send(JSON.stringify(state));
+    }
+  }
+
+  // --- End WebRTC Methods ---
+
   send(m: Record<string, unknown>) {
     if (this.open) {
       try {
@@ -149,6 +272,14 @@ export class NetClient {
 
   close() {
     this.closedByMe = true;
+    if (this.dataChannel) {
+      try { this.dataChannel.close(); } catch {}
+      this.dataChannel = null;
+    }
+    if (this.pc) {
+      try { this.pc.close(); } catch {}
+      this.pc = null;
+    }
     if (this.ws) {
       try {
         this.ws.close();
@@ -159,3 +290,4 @@ export class NetClient {
     this.ws = null;
   }
 }
+

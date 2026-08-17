@@ -169,7 +169,7 @@ function genRoomCode(): string {
 }
 
 const TICKER =
-  "INSERT COIN ▸ 1 CREDIT — 1 PLAY ▸ CO-OP UP TO 4 PILOTS OVER WEBSOCKET ▸ DENO RELAY — WS URL AUTO-DETECTED FROM PAGE ADDRESS ▸ BGM: PIXEL RUSH ▸ HOLD SPACE TO FIRE ▸ K = BOMB ▸ BOSS EVERY 5TH WAVE ▸ ";
+  "INSERT COIN ▸ 1 CREDIT — 1 PLAY ▸ CO-OP UP TO 2 PILOTS OVER WEBSOCKET ▸ DENO RELAY — WS URL AUTO-DETECTED FROM PAGE ADDRESS ▸ BGM: PIXEL RUSH ▸ HOLD SPACE TO FIRE ▸ K = BOMB ▸ BOSS EVERY 5TH WAVE ▸ ";
 
 function Ticker() {
   return (
@@ -239,7 +239,7 @@ function MenuScreen(p: MenuProps) {
           <p className="mt-5 max-w-md text-dim text-sm sm:text-base font-medium leading-relaxed">
             Tear through enemy formations in a storm of neon bullets. Fly{" "}
             <span className="text-neon font-semibold">solo</span> or squad up —{" "}
-            <span className="text-hot font-semibold">co-op for up to 4 pilots</span> over WebSocket. Shared
+            <span className="text-hot font-semibold">co-op for up to 2 pilots</span> over WebSocket. Shared
             score, shared bombs, shared fate.
           </p>
 
@@ -256,7 +256,7 @@ function MenuScreen(p: MenuProps) {
             <div className="panel-clip bg-panel/80 border border-line p-3 mt-1">
               <div className="flex items-center justify-between mb-3">
                 <span className="font-display text-[9px] text-hot tracking-wider">⚡ CO-OP SQUAD</span>
-                <span className="font-display text-[7px] text-dim">UP TO 4 PILOTS</span>
+                <span className="font-display text-[7px] text-dim">UP TO 2 PILOTS</span>
               </div>
 
               <div className="grid grid-cols-2 gap-1 mb-3">
