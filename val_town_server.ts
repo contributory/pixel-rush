@@ -2,45 +2,67 @@
  * PIXEL RUSH — Val Town Server
  * -----------------------------------------------------
  * HTTP Val entry point for Val Town.
- * Serves the pre-built `dist/` frontend and WebSocket relay.
+ * Serves the frontend and WebSocket relay using Val Town's native APIs.
  * Uses SQLite for persistent room and player state.
  */
 
-import { serveFile } from "https://esm.town/v/std/utils@85-main/index.ts";
-import { sqlite } from "https://esm.town/v/std/sqlite/main.ts";
+import { serveFile } from "https://esm.town/v/std/http/file.ts";
+import { Database } from "https://esm.town/v/std/sqlite/db.ts";
 
 const MAX_PLAYERS = 4;
 
 // Initialize Database
-await sqlite.execute(`CREATE TABLE IF NOT EXISTS rooms_metadata (room_code TEXT PRIMARY KEY, status TEXT)`);
-await sqlite.execute(`CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, room_code TEXT, name TEXT, color TEXT, is_host BOOLEAN)`);
+const db = new Database();
+db.exec(`
+  CREATE TABLE IF NOT EXISTS rooms_metadata (
+    room_code TEXT PRIMARY KEY, 
+    status TEXT DEFAULT 'lobby'
+  )
+`);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS players (
+    id TEXT PRIMARY KEY, 
+    room_code TEXT, 
+    name TEXT DEFAULT 'PILOT', 
+    color TEXT DEFAULT '#00f0ff', 
+    is_host INTEGER DEFAULT 0
+  )
+`);
 
-// In-memory active connections
-const activeConnections = new Map<string, WebSocket>();
+// In-memory active connections per room
+const roomClients = new Map<string, Set<string>>();
 
-interface Client {
+interface ClientInfo {
   id: string;
-  ws: WebSocket;
-  room: string;
   name: string;
   color: string;
+  room: string;
+  isHost: boolean;
 }
 
-const pub = (p: any) => ({ id: p.id, name: p.name, color: p.color });
+const clients = new Map<string, { ws: WebSocket; info: ClientInfo }>();
+
+const pub = (info: { id: string; name: string; color: string }) => ({ 
+  id: info.id, 
+  name: info.name || "PILOT", 
+  color: info.color || "#00f0ff" 
+});
 
 const send = (ws: WebSocket, obj: unknown) => {
   try {
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+    ws.send(JSON.stringify(obj));
   } catch {
     /* ignore broken socket */
   }
 };
 
-const broadcast = async (room: string, obj: unknown, except?: string) => {
-  const players = (await sqlite.execute(`SELECT id FROM players WHERE room_code = ?`, [room])).rows as any[];
-  for (const p of players) {
-    const ws = activeConnections.get(p.id);
-    if (ws && p.id !== except) send(ws, obj);
+const broadcastToRoom = (room: string, obj: unknown, exceptId?: string) => {
+  const clientIds = roomClients.get(room);
+  if (!clientIds) return;
+  for (const clientId of clientIds) {
+    if (clientId === exceptId) continue;
+    const client = clients.get(clientId);
+    if (client) send(client.ws, obj);
   }
 };
 
@@ -50,117 +72,215 @@ const json = (obj: unknown, status = 200) =>
     headers: { "content-type": "application/json; charset=utf-8" },
   });
 
-export default async function (req: Request): Promise<Response> {
+export default async function handler(req: Request): Promise<Response> {
   const url = new URL(req.url);
 
-  // ---------- room directory ----------
+  // CORS headers for cross-origin requests
+  const corsHeaders = {
+    "access-control-allow-origin": "*",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "access-control-allow-headers": "Content-Type, Upgrade",
+  };
+
+  // Handle preflight OPTIONS requests
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+
+  // ---------- room directory API ----------
   if (url.pathname === "/rooms") {
-    const rooms = (await sqlite.execute(`SELECT room_code, status FROM rooms_metadata`)).rows as any[];
-    const result = [];
-    for (const r of rooms) {
-      const pilots = (await sqlite.execute(`SELECT id, name, color FROM players WHERE room_code = ?`, [r.room_code])).rows as any[];
-      result.push({
-        room: r.room_code,
-        players: pilots.length,
-        max: MAX_PLAYERS,
-        status: r.status,
-        pilots: pilots,
+    try {
+      const rooms = db.exec("SELECT room_code, status FROM rooms_metadata", { returnValue: "resultRows" }) || [];
+      const result = rooms.map((r: any[]) => {
+        const roomCode = r[0];
+        const status = r[1];
+        const pilots = db.exec("SELECT id, name, color FROM players WHERE room_code = ?", { params: [roomCode], returnValue: "resultRows" }) || [];
+        return {
+          room: roomCode,
+          players: pilots.length,
+          max: MAX_PLAYERS,
+          status: status || "lobby",
+          pilots: pilots.map((p: any[]) => pub({ id: p[0], name: p[1], color: p[2] })),
+        };
       });
+      return json({ maxPlayers: MAX_PLAYERS, rooms: result });
+    } catch (e) {
+      console.error("Rooms endpoint error:", e);
+      return json({ error: "Database error", rooms: [] }, 500);
     }
-    return json({ maxPlayers: MAX_PLAYERS, rooms: result });
   }
 
   // ---------- WebSocket relay ----------
   if (url.pathname === "/ws") {
-    if (req.headers.get("upgrade") !== "websocket") {
-      return new Response("Expected a WebSocket upgrade", { status: 400 });
+    const upgradeHeader = req.headers.get("upgrade");
+    if (!upgradeHeader || upgradeHeader.toLowerCase() !== "websocket") {
+      return new Response("Expected a WebSocket upgrade", { status: 400, headers: corsHeaders });
     }
 
-    const room =
-      (url.searchParams.get("room") ?? "default").trim().toUpperCase().slice(0, 16) || "default";
+    const room = (url.searchParams.get("room") ?? "default").trim().toUpperCase().slice(0, 16) || "default";
 
-    const count = (await sqlite.execute(`SELECT COUNT(*) as cnt FROM players WHERE room_code = ?`, [room])).rows![0].cnt as number;
+    // Count current players in room
+    const countResult = db.exec("SELECT COUNT(*) FROM players WHERE room_code = ?", { params: [room], returnValue: "resultRows" }) || [];
+    const count = (countResult[0]?.[0] as number) || 0;
+
     if (count >= MAX_PLAYERS) {
       return json({ error: "room-full", room, max: MAX_PLAYERS }, 403);
     }
 
-    const { socket, response } = Deno.upgradeWebSocket(req);
-    const id = `p-${crypto.randomUUID().slice(0, 8)}`;
-    
-    socket.onopen = async () => {
-      activeConnections.set(id, socket);
-      const isHost = count === 0;
-      if (isHost) {
-        await sqlite.execute(`INSERT OR IGNORE INTO rooms_metadata (room_code, status) VALUES (?, ?)`, [room, "lobby"]);
-      }
-      await sqlite.execute(`INSERT INTO players (id, room_code, name, color, is_host) VALUES (?, ?, ?, ?, ?)`, 
-        [id, room, "PILOT", "#00f0ff", isHost ? 1 : 0]);
+    // Upgrade to WebSocket using Val Town's native API
+    const { socket, response } = await fetch("https://websocket.val.town/", {
+      method: "POST",
+      headers: {
+        "Upgrade": "websocket",
+        "Connection": "Upgrade",
+        "Sec-WebSocket-Key": crypto.randomUUID().replace(/-/g, "").slice(0, 24),
+        "Sec-WebSocket-Version": "13",
+      },
+    }).then(r => r.webSocket ? { socket: r.webSocket, response: new Response() } : Promise.reject("WS upgrade failed"));
 
-      const peers = (await sqlite.execute(`SELECT id, name, color FROM players WHERE room_code = ? AND id != ?`, [room, id])).rows as any[];
+    const id = `p-${crypto.randomUUID().slice(0, 8)}`;
+    const isHost = count === 0;
+
+    // Initialize client info
+    const clientInfo: ClientInfo = { id, name: "PILOT", color: "#00f0ff", room, isHost };
+
+    socket.addEventListener("open", () => {
+      // Store connection
+      clients.set(id, { ws: socket, info: clientInfo });
       
+      // Track room membership
+      if (!roomClients.has(room)) {
+        roomClients.set(room, new Set());
+      }
+      roomClients.get(room)!.add(id);
+
+      // Create room metadata if host
+      if (isHost) {
+        db.exec("INSERT OR IGNORE INTO rooms_metadata (room_code, status) VALUES (?, ?)", { params: [room, "lobby"] });
+      }
+
+      // Insert player into database
+      db.exec("INSERT INTO players (id, room_code, name, color, is_host) VALUES (?, ?, ?, ?, ?)", {
+        params: [id, room, clientInfo.name, clientInfo.color, isHost ? 1 : 0]
+      });
+
+      // Get existing peers
+      const peers = db.exec("SELECT id, name, color FROM players WHERE room_code = ? AND id != ?", {
+        params: [room, id],
+        returnValue: "resultRows"
+      }) || [];
+
       send(socket, {
         t: "welcome",
         id,
         room,
         youHost: isHost,
         maxPlayers: MAX_PLAYERS,
-        peers: peers.map(pub),
+        peers: peers.map((p: any[]) => pub({ id: p[0], name: p[1], color: p[2] })),
       });
-    };
 
-    socket.onmessage = async (ev) => {
+      console.log(`[+] ${id} joined "${room}" (${isHost ? "HOST" : "guest"}) — ${count + 1}/${MAX_PLAYERS} pilots`);
+    });
+
+    socket.addEventListener("message", (ev: any) => {
       let msg: Record<string, unknown>;
       try {
         msg = JSON.parse(String(ev.data));
-      } catch { return; }
+      } catch {
+        return;
+      }
+
+      const client = clients.get(id);
+      if (!client) return;
 
       if (msg.t === "join") {
         const name = String(msg.name ?? "PILOT").slice(0, 14);
         const color = String(msg.color ?? "#00f0ff").slice(0, 9);
-        await sqlite.execute(`UPDATE players SET name = ?, color = ? WHERE id = ?`, [name, color, id]);
-        await broadcast(room, { t: "peer-join", id, name, color }, id);
+        client.info.name = name;
+        client.info.color = color;
+        
+        db.exec("UPDATE players SET name = ?, color = ? WHERE id = ?", {
+          params: [name, color, id]
+        });
+        
+        broadcastToRoom(room, { t: "peer-join", id, name, color }, id);
+        console.log(`[~] ${id} is now "${name}" (room "${room}")`);
         return;
       }
 
-      if (msg.t === "start") await sqlite.execute(`UPDATE rooms_metadata SET status = ? WHERE room_code = ?`, ["battle", room]);
-      else if (msg.t === "lobby") await sqlite.execute(`UPDATE rooms_metadata SET status = ? WHERE room_code = ?`, ["lobby", room]);
+      // Track match state
+      if (msg.t === "start") {
+        db.exec("UPDATE rooms_metadata SET status = ? WHERE room_code = ?", { params: ["battle", room] });
+      } else if (msg.t === "lobby") {
+        db.exec("UPDATE rooms_metadata SET status = ? WHERE room_code = ?", { params: ["lobby", room] });
+      }
 
-      await broadcast(room, { ...msg, from: id }, id);
-    };
+      // Relay message to room
+      broadcastToRoom(room, { ...msg, from: id }, id);
+    });
 
-    const leave = async () => {
-      activeConnections.delete(id);
-      const player = (await sqlite.execute(`SELECT is_host FROM players WHERE id = ?`, [id])).rows![0] as any;
-      await sqlite.execute(`DELETE FROM players WHERE id = ?`, [id]);
+    const cleanup = () => {
+      const client = clients.get(id);
+      if (!client) return;
+
+      const wasHost = client.info.isHost;
+      clients.delete(id);
       
-      const remaining = (await sqlite.execute(`SELECT id FROM players WHERE room_code = ? ORDER BY is_host DESC`, [room])).rows as any[];
-      
+      const roomSet = roomClients.get(room);
+      if (roomSet) {
+        roomSet.delete(id);
+        if (roomSet.size === 0) {
+          roomClients.delete(room);
+        }
+      }
+
+      // Remove player from database
+      db.exec("DELETE FROM players WHERE id = ?", { params: [id] });
+
+      // Check if room is empty
+      const remaining = db.exec("SELECT id FROM players WHERE room_code = ? ORDER BY is_host DESC", {
+        params: [room],
+        returnValue: "resultRows"
+      }) || [];
+
       if (remaining.length === 0) {
-        await sqlite.execute(`DELETE FROM rooms_metadata WHERE room_code = ?`, [room]);
-      } else if (player.is_host) {
-        const newHost = remaining[0];
-        await sqlite.execute(`UPDATE players SET is_host = 1 WHERE id = ?`, [newHost.id]);
-        await broadcast(room, { t: "host", id: newHost.id });
+        db.exec("DELETE FROM rooms_metadata WHERE room_code = ?", { params: [room] });
+        console.log(`[-] ${id} left "${room}" — room deleted`);
+      } else if (wasHost) {
+        // Promote new host
+        const newHostId = remaining[0][0] as string;
+        db.exec("UPDATE players SET is_host = 1 WHERE id = ?", { params: [newHostId] });
+        const newHostClient = clients.get(newHostId);
+        if (newHostClient) {
+          newHostClient.info.isHost = true;
+        }
+        broadcastToRoom(room, { t: "host", id: newHostId });
+        console.log(`[*] ${newHostId} is the new HOST of "${room}"`);
       } else {
-        await broadcast(room, { t: "peer-leave", id });
+        broadcastToRoom(room, { t: "peer-leave", id });
+        console.log(`[-] ${id} left "${room}"`);
       }
     };
 
-    socket.onclose = leave;
-    socket.onerror = leave;
+    socket.addEventListener("close", cleanup);
+    socket.addEventListener("error", cleanup);
 
     return response;
   }
 
-  // ---------- static frontend (no bundle — each module served individually) ----------
+  // ---------- static frontend ----------
   // Serve files from the `frontend/` folder. The browser imports them as
-  // ES modules; serveFile transpiles TSX/TS on the fly, so no build step,
-  // no giant single-file bundle.
-  const p = url.pathname === "/" ? "/frontend/index.html" : url.pathname;
-  if (p.startsWith("/frontend/")) {
-    return await serveFile(p, import.meta.url);
+  // ES modules; serveFile transpiles TSX/TS on the fly.
+  const path = url.pathname === "/" ? "/frontend/index.html" : url.pathname;
+  if (path.startsWith("/frontend/")) {
+    try {
+      return await serveFile(path, import.meta.url);
+    } catch (e) {
+      console.error("Serve file error:", e);
+      return new Response("File not found", { status: 404, headers: corsHeaders });
+    }
   }
 
-  // Old /index.html used by Vite dev builds (dist/). Fallback:
-  return new Response("Not found", { status: 404 });
+  // Fallback:
+  return new Response("Not found", { status: 404, headers: corsHeaders });
 }

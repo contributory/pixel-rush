@@ -1,5 +1,1 @@
-node_modules/
-.next/
-dist/
-build/
-*.log
+Nothing needs to be added to .gitignore since only a TypeScript source file (`val_town_server.ts`) was modified and no build artifacts, dependencies, or temporary files were included in the changes.
