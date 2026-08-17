@@ -378,7 +378,7 @@ function MenuScreen(p: MenuProps) {
               {p.roomsErr ? (
                 <p className="text-[10px] text-dim/80 leading-snug bg-ink/60 border border-line px-2.5 py-2">
                   Server offline. Run{" "}
-                  <code className="text-acid">deno run --allow-net --allow-read server/main.ts</code>{" "}
+                  <code className="text-acid">deno run -A main.ts</code>{" "}
                   — it serves the game and the relay on the same address, or press{" "}
                   <b className="text-neon">AUTO</b> / edit the WS server above.
                 </p>

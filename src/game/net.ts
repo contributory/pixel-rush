@@ -1,4 +1,4 @@
-/* WebSocket client for co-op mode. JSON protocol, relay server (see server/main.ts). */
+/* WebSocket client for co-op mode. JSON protocol, relay server (see main.ts). */
 
 export type NetMsg = Record<string, unknown> & { t: string; from?: string };
 
