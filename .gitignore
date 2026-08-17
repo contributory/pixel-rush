@@ -7,27 +7,20 @@ dist/
 build/
 target/
 
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-env/
-venv/
-.venv/
-.ENV
-.python-version
+# TypeScript
+*.tsbuildinfo
+*.js.map
+*.d.ts
 
 # Logs
 *.log
 
-# Environment variables
+# Environment
 .env
 .env.local
 .env.*
 
-# IDE
+# Editor
 .vscode/
 .idea/
 *.swp
@@ -38,32 +31,13 @@ venv/
 .DS_Store
 Thumbs.db
 
-# Coverage
+# Testing
 coverage/
-htmlcov/
-.coverage
+.nyc_output/
+*.lcov
 
-# Compressed files
-*.zip
-*.gz
-*.tar
-*.tgz
-*.bz2
-*.xz
-*.7z
-*.rar
-*.zst
-*.lz4
-*.lzh
-*.cab
-*.arj
-*.rpm
-*.deb
-*.Z
-*.lz
-*.lzo
-*.tar.gz
-*.tar.bz2
-*.tar.xz
-*.tar.zst
+# Package manager
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
 ```
