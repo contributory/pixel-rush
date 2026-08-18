@@ -828,6 +828,9 @@ export class Engine {
     // Gửi qua WebRTC data channel nếu có (ưu tiên)
     if (this.net?.open) {
       this.net.broadcastState(state);
+    } else if (this.role === "host" && this.net?.open) {
+      // Fallback: gửi qua WebSocket nếu WebRTC data channel không khả dụng
+      this.net.send(state);
     }
   }
 
