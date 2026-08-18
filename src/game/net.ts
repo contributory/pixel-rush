@@ -175,6 +175,13 @@ export class NetClient {
       }
     };
 
+    this.pc.oniceconnectionstatechange = () => {
+      console.log("ICE connection state:", this.pc?.iceConnectionState);
+      if (this.pc?.iceConnectionState === "failed" || this.pc?.iceConnectionState === "disconnected") {
+        console.warn("WebRTC ICE failed, falling back to WebSocket for game state");
+      }
+    };
+
     if (this.youHost) {
       // Host creates data channel
       this.dataChannel = this.pc.createDataChannel("game");
@@ -204,6 +211,14 @@ export class NetClient {
     this.dataChannel.onopen = () => {
       console.log("WebRTC Data Channel Open");
       this.pendingCandidates = [];
+    };
+
+    this.dataChannel.onerror = (e) => {
+      console.warn("WebRTC Data Channel error:", e);
+    };
+
+    this.dataChannel.onclose = () => {
+      console.warn("WebRTC Data Channel closed, will fallback to WebSocket");
     };
 
     this.dataChannel.onmessage = (e) => {
@@ -255,6 +270,9 @@ export class NetClient {
   broadcastState(state: Record<string, unknown>) {
     if (this.dataChannel && this.dataChannel.readyState === "open") {
       this.dataChannel.send(JSON.stringify(state));
+    } else if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      // Fallback to WebSocket if data channel is not available
+      this.ws.send(JSON.stringify(state));
     }
   }
 
