@@ -1,9 +1,8 @@
 import json
-from sanic import Sanic, json as json_response, html
-from sanic.websockets import WebConnection
 
-# Import thư viện EdgeOne Pages Blob SDK Python
-from edgeone.pages_blob import get_store
+from blob_store import BlobStore
+from sanic import Sanic, Websocket, html
+from sanic import json as json_response
 
 app = Sanic("PixelRushServer")
 
@@ -42,7 +41,7 @@ async def broadcast(room_code: str, message_dict: dict, except_id: str | None = 
 
 async def sync_room_to_blob(room_code: str):
     """Đồng bộ danh sách Player (không chứa object WebSocket) lên Blob Storage"""
-    store = get_store(BLOB_STORE_NAME)
+    store = BlobStore(BLOB_STORE_NAME)
     clients = CONNECTED_ROOMS.get(room_code, [])
 
     players_data = [
@@ -59,7 +58,7 @@ async def sync_room_to_blob(room_code: str):
 async def get_rooms(request):
     """API Danh sách phòng chơi lấy từ EdgeOne Blob"""
     try:
-        store = get_store(BLOB_STORE_NAME)
+        store = BlobStore(BLOB_STORE_NAME)
         blobs = await store.list(prefix="rooms/")
 
         room_list = []
@@ -94,7 +93,7 @@ async def get_rooms(request):
 async def get_status(request):
     """API Debug thông tin server"""
     try:
-        store = get_store(BLOB_STORE_NAME)
+        store = BlobStore(BLOB_STORE_NAME)
         blobs = await store.list(prefix="rooms/")
 
         open_rooms = []
@@ -124,14 +123,14 @@ async def get_status(request):
 
 
 @app.websocket("/ws")
-async def ws_relay(request, ws: WebConnection):
+async def ws_relay(request, ws: Websocket):
     global seq
 
     room_code = request.args.get("room", "DEFAULT").strip().upper()
     seq += 1
     player_id = f"p{seq}"
 
-    store = get_store(BLOB_STORE_NAME)
+    store = BlobStore(BLOB_STORE_NAME)
 
     # Khởi tạo phòng trong RAM nếu chưa có
     if room_code not in CONNECTED_ROOMS:
