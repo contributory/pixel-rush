@@ -306,5 +306,5 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 // Export server để EdgeOne Cloud Functions sử dụng
-export default server;
+export default app;
 
