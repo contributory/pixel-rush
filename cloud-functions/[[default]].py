@@ -243,12 +243,3 @@ async def ws_relay(request, ws: WebConnection):
                 await broadcast(
                     room_code, {"t": "host", "id": remaining_clients[0]["id"]}
                 )
-
-
-# Handler mặc định tương thích với EdgeOne Functions
-def handler(request):
-    return app(request)
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT)
