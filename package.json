@@ -17,6 +17,7 @@
     "@types/ws": "^8.18.1",
     "canvas-confetti": "^1.9.3",
     "date-fns": "^2.30.0",
+    "express": "^5.2.1",
     "framer-motion": "^11.16.1",
     "hono": "^4.13.2",
     "lucide-react": "^0.294.0",
