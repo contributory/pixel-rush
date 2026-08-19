@@ -36,7 +36,9 @@ export async function fetchRooms(wsUrl: string): Promise<RoomInfo[]> {
   const ctrl = new AbortController();
   const timer = window.setTimeout(() => ctrl.abort(), 2500);
   try {
-    const res = await fetch(`${httpBase(wsUrl)}/rooms`, { signal: ctrl.signal });
+    const res = await fetch(`${httpBase(wsUrl.replace("/ws", ""))}/rooms`, {
+      signal: ctrl.signal,
+    });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = (await res.json()) as { rooms?: RoomInfo[] };
     return data.rooms ?? [];
@@ -66,7 +68,11 @@ export class NetClient {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
   }
 
-  connect(url: string, name: string, colorFor: (peers: PeerInfo[]) => string): Promise<void> {
+  connect(
+    url: string,
+    name: string,
+    colorFor: (peers: PeerInfo[]) => string,
+  ): Promise<void> {
     return new Promise((resolve, reject) => {
       let settled = false;
       let ws: WebSocket;
@@ -100,19 +106,21 @@ export class NetClient {
           this.room = String(m.room ?? "");
           this.maxPlayers = Number(m.maxPlayers ?? 2);
           this.peers = (m.peers as PeerInfo[]) ?? [];
-          ws.send(JSON.stringify({ t: "join", name, color: colorFor(this.peers) }));
+          ws.send(
+            JSON.stringify({ t: "join", name, color: colorFor(this.peers) }),
+          );
           window.clearTimeout(timer);
           if (!settled) {
             settled = true;
             resolve();
           }
           this.onPeers?.([...this.peers]);
-          
+
           // Setup WebRTC after connection
           this.setupWebRTC();
           return;
         }
-        
+
         // WebRTC Signaling messages
         if (m.t === "offer") {
           await this.handleOffer(m.offer as RTCSessionDescriptionInit);
@@ -126,7 +134,7 @@ export class NetClient {
           await this.handleIceCandidate(m.candidate as RTCIceCandidateInit);
           return;
         }
-        
+
         if (m.t === "peer-join") {
           this.peers = [
             ...this.peers,
@@ -168,17 +176,24 @@ export class NetClient {
 
     this.pc.onicecandidate = (e) => {
       if (e.candidate && this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({
-          t: "ice-candidate",
-          candidate: e.candidate
-        }));
+        this.ws.send(
+          JSON.stringify({
+            t: "ice-candidate",
+            candidate: e.candidate,
+          }),
+        );
       }
     };
 
     this.pc.oniceconnectionstatechange = () => {
       console.log("ICE connection state:", this.pc?.iceConnectionState);
-      if (this.pc?.iceConnectionState === "failed" || this.pc?.iceConnectionState === "disconnected") {
-        console.warn("WebRTC ICE failed, falling back to WebSocket for game state");
+      if (
+        this.pc?.iceConnectionState === "failed" ||
+        this.pc?.iceConnectionState === "disconnected"
+      ) {
+        console.warn(
+          "WebRTC ICE failed, falling back to WebSocket for game state",
+        );
       }
     };
 
@@ -186,15 +201,17 @@ export class NetClient {
       // Host creates data channel
       this.dataChannel = this.pc.createDataChannel("game");
       this.setupDataChannelHandlers();
-      
+
       const offer = await this.pc.createOffer();
       await this.pc.setLocalDescription(offer);
-      
+
       if (this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({
-          t: "offer",
-          offer: this.pc.localDescription
-        }));
+        this.ws.send(
+          JSON.stringify({
+            t: "offer",
+            offer: this.pc.localDescription,
+          }),
+        );
       }
     } else {
       // Guest receives data channel
@@ -239,17 +256,19 @@ export class NetClient {
     await this.pc.setLocalDescription(answer);
 
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({
-        t: "answer",
-        answer: this.pc.localDescription
-      }));
+      this.ws.send(
+        JSON.stringify({
+          t: "answer",
+          answer: this.pc.localDescription,
+        }),
+      );
     }
   }
 
   private async handleAnswer(answer: RTCSessionDescriptionInit) {
     if (!this.pc) return;
     await this.pc.setRemoteDescription(new RTCSessionDescription(answer));
-    
+
     // Add pending candidates
     for (const candidate of this.pendingCandidates) {
       await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
@@ -291,11 +310,15 @@ export class NetClient {
   close() {
     this.closedByMe = true;
     if (this.dataChannel) {
-      try { this.dataChannel.close(); } catch {}
+      try {
+        this.dataChannel.close();
+      } catch {}
       this.dataChannel = null;
     }
     if (this.pc) {
-      try { this.pc.close(); } catch {}
+      try {
+        this.pc.close();
+      } catch {}
       this.pc = null;
     }
     if (this.ws) {
@@ -308,4 +331,3 @@ export class NetClient {
     this.ws = null;
   }
 }
-
