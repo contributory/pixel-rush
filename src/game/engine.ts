@@ -697,18 +697,20 @@ export class Engine {
 
   private spawnEnemy(type: EnemyType, x: number, phase: number) {
     const w = this.wave;
+    // Giảm độ khó đầu game: scaling HP chậm hơn cho các wave đầu
+    const difficultyMultiplier = w <= 5 ? 0.7 : w <= 10 ? 0.85 : 1.0;
     const hp =
-      type === "drone" ? 1 :
-      type === "dart" ? 1 :
-      type === "spinner" ? 3 + Math.floor(w / 3) :
-      type === "tank" ? 6 + Math.floor(w / 2) :
-      type === "wraith" ? 2 + Math.floor(w / 4) :
-      type === "bomber" ? 8 + Math.floor(w / 2) :
-      type === "splitter" ? 5 + Math.floor(w / 3) :
-      type === "hunter" ? 3 + Math.floor(w / 4) :
-      type === "sentinel" ? 12 + Math.floor(w / 2) :
-      type === "miniboss" ? Math.floor((60 + w * 18) * (this.players.size > 1 ? 1.5 : 1)) :
-      Math.floor((100 + w * 25) * (this.players.size > 1 ? 1.5 : 1));
+      type === "drone" ? Math.max(1, Math.floor(1 * difficultyMultiplier)) :
+      type === "dart" ? Math.max(1, Math.floor(1 * difficultyMultiplier)) :
+      type === "spinner" ? Math.max(2, Math.floor((3 + Math.floor(w / 3)) * difficultyMultiplier)) :
+      type === "tank" ? Math.max(4, Math.floor((6 + Math.floor(w / 2)) * difficultyMultiplier)) :
+      type === "wraith" ? Math.max(2, Math.floor((2 + Math.floor(w / 4)) * difficultyMultiplier)) :
+      type === "bomber" ? Math.max(6, Math.floor((8 + Math.floor(w / 2)) * difficultyMultiplier)) :
+      type === "splitter" ? Math.max(4, Math.floor((5 + Math.floor(w / 3)) * difficultyMultiplier)) :
+      type === "hunter" ? Math.max(2, Math.floor((3 + Math.floor(w / 4)) * difficultyMultiplier)) :
+      type === "sentinel" ? Math.max(8, Math.floor((12 + Math.floor(w / 2)) * difficultyMultiplier)) :
+      type === "miniboss" ? Math.floor((60 + w * 18) * (this.players.size > 1 ? 1.5 : 1) * 0.9) :
+      Math.floor((100 + w * 25) * (this.players.size > 1 ? 1.5 : 1) * 0.85);
     const e: Enemy = {
       id: this.idc++, type,
       x, y: -40,
@@ -1329,7 +1331,8 @@ export class Engine {
 
   private firePlayer(s: ShipState) {
     const lvl = s.weapon;
-    s.cool = [0.16, 0.14, 0.125, 0.11][lvl - 1];
+    // Cải thiện vũ khí: tăng tốc độ bắn và damage ở các cấp độ cao
+    s.cool = [0.14, 0.12, 0.10, 0.09][lvl - 1]; // tăng tốc độ bắn
     const mk = (x: number, y: number, vx: number, vy: number, dmg: number, color: string, homing = false) => {
       const b: Bullet = { x, y, vx, vy, dmg, r: 4, from: "p", color, homing };
       this.bullets.push(b);
@@ -1339,20 +1342,20 @@ export class Engine {
     };
     const y0 = s.y - 18;
     if (lvl === 1) {
-      mk(s.x, y0, 0, -840, 1, "#9ffbff");
+      mk(s.x, y0, 0, -860, 1, "#9ffbff"); // tăng tốc độ đạn
     } else if (lvl === 2) {
-      mk(s.x - 8, y0, 0, -840, 1, "#9ffbff");
-      mk(s.x + 8, y0, 0, -840, 1, "#9ffbff");
+      mk(s.x - 9, y0, 0, -860, 1, "#9ffbff"); // tăng khoảng cách giữa 2 viên
+      mk(s.x + 9, y0, 0, -860, 1, "#9ffbff");
     } else if (lvl === 3) {
-      mk(s.x, y0, 0, -860, 1, "#ffd23f");
-      mk(s.x - 8, y0 + 4, -130, -820, 1, "#ffd23f");
-      mk(s.x + 8, y0 + 4, 130, -820, 1, "#ffd23f");
+      mk(s.x, y0, 0, -880, 1.2, "#ffd23f"); // tăng damage và tốc độ
+      mk(s.x - 9, y0 + 4, -140, -840, 1, "#ffd23f");
+      mk(s.x + 9, y0 + 4, 140, -840, 1, "#ffd23f");
     } else {
-      mk(s.x - 7, y0, 0, -860, 1, "#ffd23f");
-      mk(s.x + 7, y0, 0, -860, 1, "#ffd23f");
-      mk(s.x - 12, y0 + 5, -150, -800, 1, "#ffd23f");
-      mk(s.x + 12, y0 + 5, 150, -800, 1, "#ffd23f");
-      if (Math.floor(this.now * 10) % 2 === 0) mk(s.x, y0 + 6, 0, -520, 2, "#7dff5e", true);
+      mk(s.x - 8, y0, 0, -880, 1.2, "#ffd23f"); // tăng damage
+      mk(s.x + 8, y0, 0, -880, 1.2, "#ffd23f");
+      mk(s.x - 14, y0 + 5, -160, -820, 1, "#ffd23f");
+      mk(s.x + 14, y0 + 5, 160, -820, 1, "#ffd23f");
+      if (Math.floor(this.now * 12) % 2 === 0) mk(s.x, y0 + 6, 0, -540, 2.5, "#7dff5e", true); // tăng damage đạn homing
     }
     // lửa đầu nòng
     this.parts.push({
@@ -1387,9 +1390,10 @@ export class Engine {
 
   private localBombFx(x: number, y: number) {
     for (const b of this.bullets) if (b.from === "e") b.dead = true;
-    this.parts.push({ x, y, vx: 0, vy: 0, life: 0.55, max: 0.55, size: 20, color: "#ffffff", kind: "ring" });
-    this.parts.push({ x, y, vx: 0, vy: 0, life: 0.7, max: 0.7, size: 10, color: "#00f0ff", kind: "ring" });
-    this.sparks(x, y, "#ffd23f", 26);
+    // Cải thiện hiệu suất: giảm particle trong bomb fx
+    this.parts.push({ x, y, vx: 0, vy: 0, life: 0.5, max: 0.5, size: 18, color: "#ffffff", kind: "ring" });
+    this.parts.push({ x, y, vx: 0, vy: 0, life: 0.6, max: 0.6, size: 9, color: "#00f0ff", kind: "ring" });
+    this.sparks(x, y, "#ffd23f", 18); // giảm từ 26 xuống 18
     this.shake = Math.min(30, this.shake + 22);
     this.flashWhite = 0.5;
     audio.bomb();
@@ -1546,15 +1550,17 @@ export class Engine {
         } else {
           e.x = this.W / 2 + Math.sin(e.t * 0.5) * Math.max(80, this.W / 2 - 150);
           const enraged = e.hp < e.maxHp * 0.5;
-          const k = enraged ? 0.7 : 1;
+          // Giảm độ khó boss: tốc độ bắn chậm hơn và số đạn ít hơn ở wave đầu
+          const difficultyFactor = this.wave <= 10 ? 1.3 : 1.0;
+          const k = (enraged ? 0.7 : 1) * difficultyFactor;
           e.shootT -= dt;
           if (e.shootT <= 0) {
-            e.shootT = 2.3 * k;
-            const n = 14 + Math.min(8, w);
+            e.shootT = 2.8 * k; // tăng thời gian giữa các lần bắn từ 2.3 lên 2.8
+            const n = 10 + Math.min(6, w); // giảm số đạn từ 14+ xuống 10+
             const off = rand(0, TAU);
             for (let i = 0; i < n; i++) {
               const a = off + (i / n) * TAU;
-              const sp = Math.min(270, 170 + w * 5);
+              const sp = Math.min(240, 150 + w * 4); // giảm tốc độ đạn
               const b: Bullet = {
                 x: e.x, y: e.y + 10, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
                 dmg: 1, r: 6, from: "e", color: "#ffd23f",
@@ -1565,13 +1571,13 @@ export class Engine {
             audio.eshoot();
           }
           e.phase += dt;
-          if (e.phase > 1.4 * k) {
+          if (e.phase > 1.8 * k) { // tăng thời gian giữa các đợt bắn phụ
             e.phase = 0;
             const p = this.nearestPlayer(e.x, e.y);
             if (p) {
               for (let i = -2; i <= 2; i++) {
                 const d = Math.hypot(p.x - e.x, p.y - e.y) || 1;
-                const sp = Math.min(320, 230 + w * 6);
+                const sp = Math.min(280, 200 + w * 5); // giảm tốc độ đạn phụ
                 const base = Math.atan2(p.y - e.y, p.x - e.x) + i * 0.16;
                 const b: Bullet = {
                   x: e.x, y: e.y + 16, vx: Math.cos(base) * sp, vy: Math.sin(base) * sp,
@@ -1798,11 +1804,26 @@ export class Engine {
       this.dropPickup(e.x - 30, e.y, "W");
       this.dropPickup(e.x + 30, e.y, "B");
       this.pop(e.x, e.y - 40, "BOSS DOWN!", "#ff2d78", true);
-    } else if (Math.random() < 0.14) {
-      const anyHurt = [...this.players.values()].some((s) => s.lives < 4);
-      const roll = Math.random();
-      const type: PickType = roll < 0.5 ? "W" : roll < 0.75 ? "B" : anyHurt ? "H" : "W";
-      this.dropPickup(e.x, e.y, type);
+    } else {
+      // Cải thiện hệ thống dropbox: tăng tỷ lệ drop và đa dạng hóa vật phẩm
+      const baseDropRate = 0.22; // tăng từ 0.14 lên 0.22
+      const dropBonus = Math.min(0.08, this.wave * 0.005); // bonus theo wave
+      const dropChance = baseDropRate + dropBonus;
+      
+      if (Math.random() < dropChance) {
+        const anyHurt = [...this.players.values()].some((s) => s.lives < 4 || s.weapon < 3);
+        const roll = Math.random();
+        // Cải thiện phân bổ vật phẩm: ưu tiên weapon khi weapon thấp, bomb khi bomb thấp
+        let type: PickType;
+        if (roll < 0.45) {
+          type = "W"; // 45% weapon
+        } else if (roll < 0.75) {
+          type = "B"; // 30% bomb
+        } else {
+          type = anyHurt ? "H" : "W"; // 25% health hoặc weapon thêm
+        }
+        this.dropPickup(e.x, e.y, type);
+      }
     }
   }
 
@@ -1813,26 +1834,28 @@ export class Engine {
   /* ---------------- hiệu ứng ---------------- */
 
   private explode(x: number, y: number, color: string, power: number) {
-    const n = Math.floor(10 + power * 9);
+    // Cải thiện hiệu suất: giảm số particle nhưng vẫn giữ hiệu ứng đẹp
+    const n = Math.floor(8 + power * 7); // giảm từ 10+ xuống 8+
     for (let i = 0; i < n; i++) {
       const a = rand(0, TAU);
       const sp = rand(40, 130 + power * 130);
       this.parts.push({
         x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
-        life: rand(0.3, 0.75), max: 0.75, size: rand(1.5, 3.6),
-        color: Math.random() < 0.3 ? "#ffffff" : color, kind: "spark",
+        life: rand(0.25, 0.6), max: 0.6, size: rand(1.5, 3.2), // giảm thời gian sống và kích thước
+        color: Math.random() < 0.25 ? "#ffffff" : color, kind: "spark",
       });
     }
-    for (let i = 0; i < 3 + power; i++) {
+    for (let i = 0; i < 2 + power; i++) { // giảm số puff
       this.parts.push({
         x: x + rand(-8, 8), y: y + rand(-8, 8), vx: rand(-30, 30), vy: rand(-50, -10),
-        life: rand(0.4, 0.8), max: 0.8, size: rand(5, 10 + power * 4),
+        life: rand(0.35, 0.7), max: 0.7, size: rand(4, 9 + power * 3), // giảm kích thước
         color: "#5a6aa0", kind: "puff",
       });
     }
-    this.parts.push({ x, y, vx: 0, vy: 0, life: 0.4, max: 0.4, size: 6, color, kind: "ring" });
+    this.parts.push({ x, y, vx: 0, vy: 0, life: 0.35, max: 0.35, size: 5, color, kind: "ring" });
     this.shake = Math.min(30, this.shake + 2 + power * 3.5);
-    if (this.parts.length > 420) this.parts.splice(0, this.parts.length - 420);
+    // Tối ưu: giới hạn particle nghiêm ngặt hơn
+    if (this.parts.length > 350) this.parts.splice(0, this.parts.length - 350);
     audio.boom(power);
   }
 

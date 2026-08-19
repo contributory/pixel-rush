@@ -1,3 +1,80 @@
 ```
+# Dependencies
 node_modules/
+
+# Logs and temp files
+*.log
+
+# Environment variables
+.env
+.env.local
+*.env.*
+
+# IDE and editor configurations
+.vscode/
+.idea/
+
+# Build outputs and compiled files
+dist/
+build/
+*.js.map
+*.ts.map
+*.jsx.map
+*.tsx.map
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Python related
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Compressed archives
+*.zip
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.rar
+*.7z
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Coverage reports
+coverage/
+htmlcov/
+
+# Testing
+*.pytest_cache/
+.mypy_cache/
+
+# Browserslist
+.browserslist
+
+# TypeScript
+*.tsbuildinfo
+
+# Vite
+.vite/
+
+# Supabase
+.supabase/
+
+# NPM
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
 ```
