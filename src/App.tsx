@@ -169,7 +169,7 @@ function genRoomCode(): string {
 }
 
 const TICKER =
-  "INSERT COIN ▸ 1 CREDIT — 1 PLAY ▸ CO-OP UP TO 2 PILOTS OVER WEBSOCKET ▸ DENO RELAY — WS URL AUTO-DETECTED FROM PAGE ADDRESS ▸ BGM: PIXEL RUSH ▸ HOLD SPACE TO FIRE ▸ K = BOMB ▸ BOSS EVERY 5TH WAVE ▸ ";
+  "INSERT COIN ▸ 1 CREDIT — 1 PLAY ▸ CO-OP UP TO 2 PILOTS OVER WEBSOCKET ▸ DENO RELAY — WS URL AUTO-DETECTED FROM PAGE ADDRESS ▸ BGM: PIXEL RUSH ▸ AUTO-FIRE ▸ K = BOMB ▸ BOSS EVERY 5TH WAVE ▸ ";
 
 function Ticker() {
   return (
@@ -447,8 +447,8 @@ function MenuScreen(p: MenuProps) {
               <span className="flex gap-1"><Key>W</Key><Key>A</Key><Key>S</Key><Key>D</Key><span className="text-dim text-xs">/</span><Key>←↑↓→</Key></span>
             </li>
             <li className="flex items-center justify-between gap-3">
-              <span className="text-dim font-medium">Fire (hold)</span>
-              <span className="flex gap-1"><Key>SPACE</Key><span className="text-dim text-xs">/</span><Key>J</Key></span>
+              <span className="text-dim font-medium">Auto-fire</span>
+              <span className="font-display text-[9px] text-acid">ALWAYS ON</span>
             </li>
             <li className="flex items-center justify-between gap-3">
               <span className="text-dim font-medium">Bomb — clears bullets</span>
@@ -731,7 +731,7 @@ function Hud({ hud, bgmPlaying, onLeave }: { hud: HudData; bgmPlaying: boolean; 
 
       {/* bottom hint */}
       <div className="absolute bottom-2 left-1/2 -translate-x-1/2 font-body text-[11px] text-dim/80 tracking-wide whitespace-nowrap">
-        {coop ? "SPACE fire · K bomb — the host runs the battle" : "SPACE fire · K bomb · P pause · M music"}
+        {coop ? "K bomb — the host runs the battle" : "K bomb · P pause · M music"}
         <span className={`ml-3 inline-flex items-center gap-1 ${bgmPlaying ? "text-acid" : "text-dim"}`}>
           {bgmPlaying ? <EqBars /> : "♪"}
         </span>
