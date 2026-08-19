@@ -1,10 +1,9 @@
 /* Hệ thống âm thanh: nhạc nền + hiệu ứng tổng hợp WebAudio. */
 
+/** Bundled BGM — served from public/music/ via Vite (and prod static host). */
 const LOCAL_SRC = "/music/pixel-rush.mp3";
-const REMOTE_SRC =
-  "https://s3.us-east-005.backblazeb2.com/bosuutap/music/Pixel%20Rush.mp3?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=0055373d2f421cb0000000004%2F20260816%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260816T113422Z&X-Amz-Expires=604800&X-Amz-Signature=0b7be1365c7f154e23a8eefd444c6bda99d173d740908e293dd0af131aefc4b7&X-Amz-SignedHeaders=host&x-amz-checksum-mode=ENABLED&x-id=GetObject";
 
-export type BgmSource = "local" | "remote" | "synth" | "none";
+export type BgmSource = "local" | "synth" | "none";
 
 class AudioSys {
   private ctx: AudioContext | null = null;
@@ -58,14 +57,14 @@ class AudioSys {
     el.loop = true;
     el.preload = "auto";
     el.volume = this.muted ? 0 : 0.5;
-    let stage = 0;
     let settled = false;
 
-    const finish = (src: BgmSource) => {
+    const finish = () => {
+      if (settled) return;
       settled = true;
       this.bgmStarting = false;
       this.bgm = el;
-      this.bgmSource = src;
+      this.bgmSource = "local";
       el.addEventListener("play", () => this.emit());
       el.addEventListener("pause", () => this.emit());
       el.addEventListener("ended", () => this.emit());
@@ -80,30 +79,14 @@ class AudioSys {
       if (settled) return;
       settled = true;
       this.bgmStarting = false;
+      console.warn("[audio] /music/pixel-rush.mp3 missing — using chiptune fallback");
       this.startSynth();
     };
 
-    const next = () => {
-      if (settled) return;
-      if (stage === 0) {
-        stage = 1;
-        el.onerror = fallbackSynth;
-        el.src = REMOTE_SRC;
-        el.load();
-      } else {
-        fallbackSynth();
-      }
-    };
-
-    el.onerror = next;
+    el.addEventListener("error", fallbackSynth, { once: true });
+    el.addEventListener("canplay", finish, { once: true });
     el.src = LOCAL_SRC;
     el.load();
-
-    // Treat the source as ready; actual playback is explicitly triggered by
-    // resume(), which is called from a Chrome user-gesture handler.
-    el.addEventListener("canplay", () => {
-      if (!settled) finish(stage === 0 ? "local" : "remote");
-    }, { once: true });
   }
 
   /** True when BGM (file or synth loop) is actively playing. */
