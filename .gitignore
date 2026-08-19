@@ -1,4 +1,3 @@
-```
 # Build artifacts
 dist/
 build/
@@ -50,4 +49,3 @@ Thumbs.db
 *.7z
 *.rar
 *.zst
-```
