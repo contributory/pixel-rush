@@ -576,7 +576,7 @@ export class Engine {
       this.net.send({ t: "start" });
       this.startMatch();
     } else {
-      // PLAY AGAIN: ván mới từ đầu; tiến độ solo vẫn giữ để CONTINUE từ menu
+      // PLAY AGAIN: still loads pilot account (arsenal + wave)
       this.startMatch();
     }
     audio.select();
