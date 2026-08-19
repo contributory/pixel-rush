@@ -133,7 +133,7 @@ interface Enemy {
   tx: number; ty: number; thp: number;
   dead?: boolean;
 }
-type PickType = "W" | "B" | "H";
+type PickType = "W" | "B" | "H" | "S" | "F" | "M" | "D";
 interface Pickup {
   id: number; type: PickType; x: number; y: number; t: number;
   tx: number; ty: number; dead?: boolean;
@@ -172,15 +172,19 @@ export class Engine {
   private keys = new Set<string>();
   private pressed = new Set<string>();
 
-  /* --- điều khiển cảm ứng (mobile): joystick ảo --- */
-  private stick = { x: 0, y: 0 };
-  private stickPtr: number | null = null;
-  private stickOx = 0;
-  private stickOy = 0;
-  private stickR = 64;
+  /* --- điều khiển: PC (mouse + keyboard), Mobile (chạm trực tiếp) --- */
+  private mouseX = 0;
+  private mouseY = 0;
+  private mouseActive = false;
+  private showCursor = false;
+  private touchX: number | null = null;
+  private touchY: number | null = null;
+  private controlMode: "keyboard" | "mouse" | "touch" = "keyboard";
   private onPtrDown: (e: PointerEvent) => void;
   private onPtrMove: (e: PointerEvent) => void;
   private onPtrUp: (e: PointerEvent) => void;
+  private onKeyDown: (e: KeyboardEvent) => void;
+  private onKeyUp: (e: KeyboardEvent) => void;
 
   private raf = 0;
   private last = 0;
@@ -221,8 +225,6 @@ export class Engine {
   private shipT = 0;
   private streakT = 2;
 
-  private onKeyDown: (e: KeyboardEvent) => void;
-  private onKeyUp: (e: KeyboardEvent) => void;
   private onResize: () => void;
   private onVis: () => void;
 
@@ -241,7 +243,7 @@ export class Engine {
 
     this.onResize = () => this.resize();
     this.onKeyDown = (e) => this.keyDown(e);
-    this.onKeyUp = (e) => this.keys.delete(e.code);
+    this.onKeyUp = (e) => this.keyUp(e);
     this.onVis = () => {
       if (document.hidden && this.role === "solo" && this.phase === "playing") {
         this.setPhase("paused");
@@ -252,7 +254,27 @@ export class Engine {
     window.addEventListener("keyup", this.onKeyUp);
     document.addEventListener("visibilitychange", this.onVis);
 
-    // Cảm ứng: chặn scroll/zoom, joystick ảo bám theo ngón tay
+    // PC: mouse follow + Ctrl để hiện chuột
+    this.canvas.addEventListener("mousemove", (e) => {
+      const rect = this.canvas.getBoundingClientRect();
+      this.mouseX = e.clientX - rect.left;
+      this.mouseY = e.clientY - rect.top;
+      this.mouseActive = true;
+      this.controlMode = "mouse";
+      if (!this.showCursor) {
+        this.canvas.style.cursor = "none";
+      }
+    });
+
+    this.canvas.addEventListener("mousedown", () => {
+      if (this.phase === "playing") this.me.firing = true;
+    });
+
+    this.canvas.addEventListener("mouseup", () => {
+      this.me.firing = false;
+    });
+
+    // Mobile: chạm trực tiếp để di chuyển (direct touch follow)
     this.onPtrDown = (e) => this.pointerDown(e);
     this.onPtrMove = (e) => this.pointerMove(e);
     this.onPtrUp = (e) => this.pointerUp(e);
@@ -349,6 +371,11 @@ export class Engine {
       if (e.code === "KeyM") {
         audio.setMuted(!audio.muted);
       }
+      // Ctrl để hiện chuột
+      if (e.code === "ControlLeft" || e.code === "ControlRight") {
+        this.showCursor = true;
+        this.canvas.style.cursor = "default";
+      }
       if ((e.code === "KeyP" || e.code === "Escape") && this.role === "solo") {
         if (this.phase === "playing") this.setPhase("paused");
         else if (this.phase === "paused") this.setPhase("playing");
@@ -359,36 +386,40 @@ export class Engine {
     }
   }
 
-  /* --- điều khiển cảm ứng: joystick ảo (kéo ngón tay trên màn hình) --- */
+  private keyUp(e: KeyboardEvent) {
+    this.keys.delete(e.code);
+    if (e.code === "ControlLeft" || e.code === "ControlRight") {
+      this.showCursor = false;
+      this.canvas.style.cursor = "none";
+    }
+  }
+
+  /* --- điều khiển cảm ứng: chạm trực tiếp (direct touch follow) --- */
   private pointerDown(e: PointerEvent) {
     if (this.phase !== "playing") return;
-    if (this.stickPtr !== null) return; // chỉ theo dõi 1 ngón
     try {
       this.canvas.setPointerCapture(e.pointerId);
     } catch { /* ignore */ }
-    this.stickPtr = e.pointerId;
-    this.stickOx = e.clientX;
-    this.stickOy = e.clientY;
-    this.stick.x = 0;
-    this.stick.y = 0;
+    const rect = this.canvas.getBoundingClientRect();
+    this.touchX = e.clientX - rect.left;
+    this.touchY = e.clientY - rect.top;
+    this.controlMode = "touch";
+    // Auto-fire khi chạm
+    this.me.firing = true;
     e.preventDefault();
   }
 
   private pointerMove(e: PointerEvent) {
-    if (this.stickPtr !== e.pointerId) return;
-    const dx = e.clientX - this.stickOx;
-    const dy = e.clientY - this.stickOy;
-    const len = Math.hypot(dx, dy);
-    const k = len > this.stickR ? this.stickR / len : 1;
-    this.stick.x = (dx * k) / this.stickR;
-    this.stick.y = (dy * k) / this.stickR;
+    if (this.controlMode !== "touch") return;
+    const rect = this.canvas.getBoundingClientRect();
+    this.touchX = e.clientX - rect.left;
+    this.touchY = e.clientY - rect.top;
   }
 
   private pointerUp(e: PointerEvent) {
-    if (this.stickPtr !== e.pointerId) return;
-    this.stickPtr = null;
-    this.stick.x = 0;
-    this.stick.y = 0;
+    this.touchX = null;
+    this.touchY = null;
+    this.me.firing = false;
     try {
       this.canvas.releasePointerCapture(e.pointerId);
     } catch { /* ignore */ }
@@ -1066,16 +1097,44 @@ export class Engine {
     /* --- phi công địa phương --- */
     const me = this.me;
     if (me.alive) {
-      const dx = (this.keys.has("ArrowRight") || this.keys.has("KeyD") ? 1 : 0) -
-        (this.keys.has("ArrowLeft") || this.keys.has("KeyA") ? 1 : 0) + this.stick.x;
-      const dy = (this.keys.has("ArrowDown") || this.keys.has("KeyS") ? 1 : 0) -
-        (this.keys.has("ArrowUp") || this.keys.has("KeyW") ? 1 : 0) + this.stick.y;
-      const len = Math.hypot(dx, dy) || 1;
-      const speed = 370;
-      me.vx = (dx / len) * speed;
-      const vy = (dy / len) * speed;
-      me.x = clamp(me.x + me.vx * dt, 26, this.W - 26);
-      me.y = clamp(me.y + vy * dt, this.H * 0.35, this.H - 40);
+      let tx = me.x;
+      let ty = me.y;
+
+      // PC: mouse follow
+      if (this.controlMode === "mouse" && this.mouseActive) {
+        tx = this.mouseX;
+        ty = this.mouseY;
+      }
+      // Mobile: touch follow
+      else if (this.controlMode === "touch" && this.touchX !== null && this.touchY !== null) {
+        tx = this.touchX;
+        ty = this.touchY;
+      }
+      // Keyboard
+      else {
+        const kx = (this.keys.has("ArrowRight") || this.keys.has("KeyD") ? 1 : 0) -
+          (this.keys.has("ArrowLeft") || this.keys.has("KeyA") ? 1 : 0);
+        const ky = (this.keys.has("ArrowDown") || this.keys.has("KeyS") ? 1 : 0) -
+          (this.keys.has("ArrowUp") || this.keys.has("KeyW") ? 1 : 0);
+        if (kx !== 0 || ky !== 0) {
+          const len = Math.hypot(kx, ky) || 1;
+          const speed = 370;
+          me.vx = (kx / len) * speed;
+          const vy = (ky / len) * speed;
+          tx = me.x + me.vx * dt;
+          ty = me.y + vy * dt;
+        }
+      }
+
+      // Di chuyển đến vị trí mục tiêu (lerp cho mượt)
+      const lerpFactor = this.controlMode === "touch" || this.controlMode === "mouse" ? 0.25 : 1;
+      me.x = me.x + (tx - me.x) * lerpFactor;
+      me.y = me.y + (ty - me.y) * lerpFactor;
+
+      // Clamp trong màn hình
+      me.x = clamp(me.x, 26, this.W - 26);
+      me.y = clamp(me.y, this.H * 0.35, this.H - 40);
+
       me.firing = true; // auto-fire: phi công chỉ cần di chuyển
       me.cool -= dt;
       if (me.firing && me.cool <= 0) this.firePlayer(me);
@@ -1417,7 +1476,7 @@ export class Engine {
         this.score += 300;
         this.pop(me.x, me.y - 30, "+300", "#ff2d78");
       }
-    } else {
+    } else if (type === "H") {
       if (me.lives < 4) {
         me.lives++;
         this.pop(me.x, me.y - 30, "LIFE +1", "#7dff5e", true);
@@ -1425,6 +1484,28 @@ export class Engine {
         this.score += 1000;
         this.pop(me.x, me.y - 30, "+1000", "#7dff5e");
       }
+    } else if (type === "S") {
+      // Shield - thêm mạng tạm thời
+      me.lives = Math.min(5, me.lives + 1);
+      this.pop(me.x, me.y - 30, "SHIELD!", "#00f0ff", true);
+    } else if (type === "F") {
+      // Fire Rate - tăng tốc độ bắn
+      me.cool = Math.max(0, me.cool - 0.08);
+      this.pop(me.x, me.y - 30, "FAST FIRE!", "#ff9d2e", true);
+    } else if (type === "M") {
+      // Missile - đạn tên lửa
+      me.weapon = Math.max(me.weapon, 3);
+      this.pop(me.x, me.y - 30, "MISSILE!", "#b45cff", true);
+    } else if (type === "D") {
+      // Double - nhân đôi đạn hiện tại
+      if (me.weapon < 4) {
+        me.weapon += 2;
+        me.weapon = Math.min(4, me.weapon);
+      } else {
+        this.score += 800;
+        this.pop(me.x, me.y - 30, "+800", "#ff2d78");
+      }
+      this.pop(me.x, me.y - 30, "DOUBLE!", "#ff4d8f", true);
     }
     this.ring(me.x, me.y, "#ffffff");
     audio.power();
@@ -1806,21 +1887,29 @@ export class Engine {
       this.pop(e.x, e.y - 40, "BOSS DOWN!", "#ff2d78", true);
     } else {
       // Cải thiện hệ thống dropbox: tăng tỷ lệ drop và đa dạng hóa vật phẩm
-      const baseDropRate = 0.22; // tăng từ 0.14 lên 0.22
-      const dropBonus = Math.min(0.08, this.wave * 0.005); // bonus theo wave
+      const baseDropRate = 0.28; // tăng từ 0.14 lên 0.28
+      const dropBonus = Math.min(0.12, this.wave * 0.008); // bonus theo wave
       const dropChance = baseDropRate + dropBonus;
       
       if (Math.random() < dropChance) {
         const anyHurt = [...this.players.values()].some((s) => s.lives < 4 || s.weapon < 3);
         const roll = Math.random();
-        // Cải thiện phân bổ vật phẩm: ưu tiên weapon khi weapon thấp, bomb khi bomb thấp
+        // Cải thiện phân bổ vật phẩm: thêm nhiều loại mới S, F, M, D
         let type: PickType;
-        if (roll < 0.45) {
-          type = "W"; // 45% weapon
-        } else if (roll < 0.75) {
-          type = "B"; // 30% bomb
+        if (roll < 0.35) {
+          type = "W"; // 35% weapon
+        } else if (roll < 0.55) {
+          type = "B"; // 20% bomb
+        } else if (roll < 0.70) {
+          type = "H"; // 15% health
+        } else if (roll < 0.80) {
+          type = "S"; // 10% shield
+        } else if (roll < 0.88) {
+          type = "F"; // 8% fire rate
+        } else if (roll < 0.94) {
+          type = "M"; // 6% missile
         } else {
-          type = anyHurt ? "H" : "W"; // 25% health hoặc weapon thêm
+          type = "D"; // 6% double
         }
         this.dropPickup(e.x, e.y, type);
       }
@@ -2311,7 +2400,19 @@ export class Engine {
 
   private drawPickups(c: CanvasRenderingContext2D) {
     for (const p of this.picks) {
-      const col = p.type === "W" ? "#ffd23f" : p.type === "B" ? "#ff2d78" : "#7dff5e";
+      // Màu sắc cho từng loại vật phẩm mới
+      let col: string;
+      let label: string;
+      switch (p.type) {
+        case "W": col = "#ffd23f"; label = "W"; break;
+        case "B": col = "#ff2d78"; label = "B"; break;
+        case "H": col = "#7dff5e"; label = "H"; break;
+        case "S": col = "#00f0ff"; label = "S"; break;
+        case "F": col = "#ff9d2e"; label = "F"; break;
+        case "M": col = "#b45cff"; label = "M"; break;
+        case "D": col = "#ff4d8f"; label = "D"; break;
+        default: col = "#ffffff"; label = "?";
+      }
       c.save();
       c.translate(p.x, p.y);
       const pul = 1 + Math.sin(p.t * 6) * 0.12;
@@ -2336,7 +2437,7 @@ export class Engine {
       c.font = "9px 'Press Start 2P', monospace";
       c.textAlign = "center";
       c.textBaseline = "middle";
-      c.fillText(p.type, 0, 1);
+      c.fillText(label, 0, 1);
       c.restore();
     }
   }
