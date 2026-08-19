@@ -75,7 +75,11 @@ async def sync_room_to_blob(room_code: str):
 
 @app.get("/rooms")
 async def get_rooms(request):
-    """API Danh sách phòng chơi — lấy từ Blob, fallback RAM nếu Blob lỗi"""
+    """API Danh sách phòng chơi — ưu tiên RAM (live sockets), blob chỉ là phụ"""
+    # Live connections are the source of truth. Blob lags and can show ghost rooms.
+    live = rooms_from_ram()
+    if live:
+        return json_response({"maxPlayers": MAX_PLAYERS, "rooms": live})
     try:
         store = BlobStore(BLOB_STORE_NAME)
         blobs = await store.list(prefix="rooms/")

@@ -15,23 +15,54 @@ export interface RoomInfo {
   status?: "lobby" | "battle";
 }
 
-/** ws://host:port  ->  http://host:port (for the /rooms directory) */
+/**
+ * Normalize a user/server URL into a clean WebSocket origin (no trailing slash,
+ * no trailing /ws). Accepts ws://, wss://, http://, https://, or bare host.
+ */
+export function normalizeWsOrigin(raw: string): string {
+  let u = raw.trim();
+  if (!u) return "";
+  // Bare host → assume current page protocol (ws/wss)
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(u)) {
+    const proto = typeof window !== "undefined" && window.location.protocol === "https:"
+      ? "wss://"
+      : "ws://";
+    u = proto + u;
+  }
+  // http(s) → ws(s)
+  u = u.replace(/^http\b/i, "ws");
+  // strip path/query: we only want origin (+ optional path prefix without /ws)
+  try {
+    const parsed = new URL(u);
+    let path = parsed.pathname.replace(/\/+$/, "");
+    // Drop a trailing /ws segment (common when users paste the WS endpoint)
+    path = path.replace(/\/ws$/i, "");
+    // Origin only + optional non-/ws path prefix
+    const origin = `${parsed.protocol}//${parsed.host}`;
+    return path && path !== "/" ? `${origin}${path}` : origin;
+  } catch {
+    return u.replace(/\/$/, "").replace(/\/ws$/i, "");
+  }
+}
+
+/** WebSocket URL for a room: <origin>/ws?room=CODE */
+export function roomWsUrl(server: string, room: string): string {
+  const origin = normalizeWsOrigin(server);
+  return `${origin}/ws?room=${encodeURIComponent(room.trim().toUpperCase())}`;
+}
+
+/** HTTP base for REST (/rooms, /status) derived from a WS server string. */
 export function httpBase(wsUrl: string): string {
-  return wsUrl.trim().replace(/\/$/, "").replace(/^ws/i, "http");
+  return normalizeWsOrigin(wsUrl).replace(/^ws/i, "http");
 }
 
 /**
- * Auto-derive the relay server address from the page URL:
- *  - page served on port 8000  => the relay is the same origin
- *  - any other page (dev / preview) => relay on the same host, port 8000
- *  - https page => wss://
+ * Auto-derive the relay server address from the page URL.
+ * Production (edgeone / pixel-rush host) and local same-origin both use the
+ * page host — the /ws path is appended later by roomWsUrl().
  */
 export function defaultWsUrl(): string {
   const proto = window.location.protocol === "https:" ? "wss://" : "ws://";
-  // For production deployment at pixel-rush.edgeone.dev, use the full URL with /ws path
-  if (window.location.host.includes("edgeone.dev") || window.location.host.includes("pixel-rush")) {
-    return `${proto}${window.location.host}/ws`;
-  }
   return `${proto}${window.location.host}`;
 }
 
@@ -40,7 +71,8 @@ export async function fetchRooms(wsUrl: string): Promise<RoomInfo[]> {
   const ctrl = new AbortController();
   const timer = window.setTimeout(() => ctrl.abort(), 2500);
   try {
-    const res = await fetch(`${httpBase(wsUrl)}/rooms`, {
+    const base = httpBase(wsUrl);
+    const res = await fetch(`${base}/rooms`, {
       signal: ctrl.signal,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);

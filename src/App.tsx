@@ -9,7 +9,7 @@ import {
   type RunProgress,
 } from "./game/engine";
 import { audio, type BgmSource } from "./game/audio";
-import { defaultWsUrl, fetchRooms, type RoomInfo } from "./game/net";
+import { defaultWsUrl, fetchRooms, normalizeWsOrigin, type RoomInfo } from "./game/net";
 
 /* ================= SVG icons (no emoji) ================= */
 
@@ -271,6 +271,22 @@ function MenuScreen(p: MenuProps) {
               <span className="text-[8px] opacity-70">{p.progress ? "NEW RUN" : "1 PLAYER"}</span>
             </button>
 
+            {/* ------ pilot display name (always editable) ------ */}
+            <label className="panel-clip bg-panel/80 border border-line p-3 block">
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-display text-[9px] text-neon tracking-wider">✎ PILOT NAME</span>
+                <span className="font-display text-[7px] text-dim">SHOWN IN CO-OP</span>
+              </div>
+              <input
+                value={p.name}
+                onChange={(e) => p.setName(e.target.value.toUpperCase().slice(0, 12))}
+                placeholder="YOUR NAME"
+                maxLength={12}
+                spellCheck={false}
+                className="w-full bg-ink border border-line px-3 py-2.5 text-sm text-snow font-display tracking-wider placeholder:text-dim/50 focus:outline-none focus:border-neon"
+              />
+            </label>
+
             {/* ------ co-op: create / join ------ */}
             <div className="panel-clip bg-panel/80 border border-line p-3 mt-1">
               <div className="flex items-center justify-between mb-3">
@@ -350,16 +366,7 @@ function MenuScreen(p: MenuProps) {
 
               {/* connection settings */}
               <div className="grid sm:grid-cols-[1fr_1fr] gap-2 mt-3 pt-3 border-t border-line/70">
-                <label className="block">
-                  <span className="text-[10px] uppercase tracking-wider text-dim font-semibold">Pilot name</span>
-                  <input
-                    value={p.name}
-                    onChange={(e) => p.setName(e.target.value.toUpperCase().slice(0, 12))}
-                    spellCheck={false}
-                    className="w-full mt-1 bg-ink border border-line px-2 py-1.5 text-xs text-snow font-mono focus:outline-none focus:border-hot"
-                  />
-                </label>
-                <label className="block">
+                <label className="block sm:col-span-2">
                   <span className="text-[10px] uppercase tracking-wider text-dim font-semibold">WS server</span>
                   <div className="flex items-center gap-1.5 mt-1">
                     <input
@@ -524,15 +531,18 @@ function MenuScreen(p: MenuProps) {
 interface LobbyProps {
   net: NetInfo;
   room: string;
+  pilotName: string;
   onStart: () => void;
   onLeave: () => void;
 }
 
-function LobbyScreen({ net, room, onStart, onLeave }: LobbyProps) {
+function LobbyScreen({ net, room, pilotName, onStart, onLeave }: LobbyProps) {
   const [copied, setCopied] = useState(false);
   const isHost = net.youHost;
-  const squad = [{ id: "you", name: "YOU", color: net.myColor, host: isHost }, ...net.peers.map((p) => ({ ...p, host: false }))];
-  const slots = Array.from({ length: 4 });
+  const displayName = (pilotName || "PILOT").toUpperCase().slice(0, 12);
+  const squad = [{ id: "you", name: displayName, color: net.myColor, host: isHost }, ...net.peers.map((p) => ({ ...p, host: false }))];
+  // Server caps rooms at 2 players
+  const slots = Array.from({ length: 2 });
 
   const copy = async () => {
     try {
@@ -552,7 +562,7 @@ function LobbyScreen({ net, room, onStart, onLeave }: LobbyProps) {
             <span className="font-display text-[10px] text-hot blink">●</span>
             <h2 className="font-display text-sm sm:text-base text-snow tracking-wider">MISSION LOBBY</h2>
             <span className="ml-auto font-display text-[8px] text-dim">
-              {squad.length}/4 PILOTS
+              {squad.length}/2 PILOTS
             </span>
           </div>
 
@@ -960,8 +970,15 @@ export default function App() {
 
   const handleCreate = () => {
     setJoinErr(null);
+    const origin = normalizeWsOrigin(server);
+    if (!origin) {
+      setJoinErr("Enter a valid WS server address");
+      return;
+    }
+    // Persist the normalized form so next time AUTO/localStorage is clean
+    if (origin !== server) setServer(origin);
     setRoom(createdCode);
-    eng()?.startCoop(server, createdCode, pilot);
+    eng()?.startCoop(origin, createdCode, pilot);
   };
 
   const handleJoin = async (raw: string) => {
@@ -982,8 +999,14 @@ export default function App() {
       /* directory unreachable — try connecting anyway */
     }
     setJoinErr(null);
+    const origin = normalizeWsOrigin(server);
+    if (!origin) {
+      setJoinErr("Enter a valid WS server address");
+      return;
+    }
+    if (origin !== server) setServer(origin);
     setRoom(code);
-    eng()?.startCoop(server, code, pilot);
+    eng()?.startCoop(origin, code, pilot);
   };
 
   return (
@@ -1019,6 +1042,7 @@ export default function App() {
         <LobbyScreen
           net={net}
           room={room}
+          pilotName={pilot}
           onStart={() => eng()?.hostStart()}
           onLeave={() => eng()?.quitToMenu()}
         />

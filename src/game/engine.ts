@@ -6,7 +6,7 @@
    ============================================================ */
 
 import { audio } from "./audio";
-import { NetClient, type NetMsg, type PeerInfo } from "./net";
+import { NetClient, roomWsUrl, type NetMsg, type PeerInfo } from "./net";
 
 export type Phase = "menu" | "connecting" | "playing" | "paused" | "gameover";
 export type Role = "solo" | "host" | "guest";
@@ -500,10 +500,15 @@ export class Engine {
     net.onMsg = (m) => this.handleNet(m);
     net.onPeers = () => this.emitNet();
     net.onClose = () => this.handleDisconnect();
-    // Strip a trailing "/ws" too — older builds stored `.../ws` in localStorage,
-    // which would otherwise produce a double /ws/ws path.
-    const base = urlBase.replace(/\/$/, "").replace(/\/ws$/i, "");
-    const wsUrl = `${base}/ws?room=${encodeURIComponent(room)}`;
+    // Normalize server URL (handles bare host, http(s), trailing /ws, etc.)
+    const wsUrl = roomWsUrl(urlBase, room);
+    if (!wsUrl.startsWith("ws")) {
+      this.net = null;
+      this.role = "solo";
+      this.setPhase("menu");
+      this.emitNet("Invalid server address");
+      return;
+    }
     try {
       // pick the first palette color nobody in the room already uses
       let myColor = PALETTE[0];
