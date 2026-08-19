@@ -28,7 +28,7 @@ export function httpBase(wsUrl: string): string {
  */
 export function defaultWsUrl(): string {
   const proto = window.location.protocol === "https:" ? "wss://" : "ws://";
-  return `${proto}${window.location.host}/ws`;
+  return `${proto}${window.location.host}`;
 }
 
 /** Ask the server for the list of open rooms. Throws when unreachable. */
@@ -36,7 +36,7 @@ export async function fetchRooms(wsUrl: string): Promise<RoomInfo[]> {
   const ctrl = new AbortController();
   const timer = window.setTimeout(() => ctrl.abort(), 2500);
   try {
-    const res = await fetch(`${httpBase(wsUrl.replace("/ws", ""))}/rooms`, {
+    const res = await fetch(`${httpBase(wsUrl)}/rooms`, {
       signal: ctrl.signal,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
