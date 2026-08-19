@@ -301,6 +301,9 @@ function MenuScreen(p: MenuProps) {
                   <p className="text-[10px] text-dim/80 mt-2 leading-snug">
                     Share the code — friends pick <b className="text-snow">JOIN ROOM</b> and type it in.
                   </p>
+                  {p.joinErr && (
+                    <div className="font-display text-[8px] text-hot mt-2">✕ {p.joinErr}</div>
+                  )}
                 </div>
               ) : (
                 <div className="slide-up">

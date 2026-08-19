@@ -14,6 +14,8 @@ BLOB_STORE_NAME = "pixel-rush-rooms"
 # In-memory Socket Manager (Lưu giữ WebSocket kết nối thực tế trong RAM)
 # Cấu trúc: { "ROOM_CODE": [ {"id": "p1", "ws": WebConnection, "name": "...", "color": "..."}, ... ] }
 CONNECTED_ROOMS = {}
+# Trạng thái phòng trong RAM (mirror của blob status) — dùng làm fallback khi Blob lỗi
+ROOM_STATUS = {}
 seq = 0
 
 
@@ -24,6 +26,23 @@ def get_room_key(room_code: str) -> str:
 
 def get_status_key(room_code: str) -> str:
     return f"status/{room_code}.json"
+
+
+def rooms_from_ram() -> list:
+    """Liệt kê phòng từ RAM — fallback khi Blob Storage không khả dụng."""
+    return [
+        {
+            "room": code,
+            "players": len(clients),
+            "max": MAX_PLAYERS,
+            "status": ROOM_STATUS.get(code, "lobby"),
+            "pilots": [
+                {"id": c["id"], "name": c["name"], "color": c["color"]}
+                for c in clients
+            ],
+        }
+        for code, clients in CONNECTED_ROOMS.items()
+    ]
 
 
 async def broadcast(room_code: str, message_dict: dict, except_id: str | None = None):
@@ -56,7 +75,7 @@ async def sync_room_to_blob(room_code: str):
 
 @app.get("/rooms")
 async def get_rooms(request):
-    """API Danh sách phòng chơi lấy từ EdgeOne Blob"""
+    """API Danh sách phòng chơi — lấy từ Blob, fallback RAM nếu Blob lỗi"""
     try:
         store = BlobStore(BLOB_STORE_NAME)
         blobs = await store.list(prefix="rooms/")
@@ -84,9 +103,9 @@ async def get_rooms(request):
 
         return json_response({"maxPlayers": MAX_PLAYERS, "rooms": room_list})
     except Exception as e:
-        return json_response(
-            {"error": "Failed to fetch rooms", "details": str(e)}, status=500
-        )
+        # Blob không khả dụng → vẫn trả về các phòng đang mở trong RAM
+        print(f"[Rooms] Blob unavailable, using RAM fallback: {e}")
+        return json_response({"maxPlayers": MAX_PLAYERS, "rooms": rooms_from_ram()})
 
 
 @app.get("/status")
@@ -149,14 +168,17 @@ async def ws_relay(request, ws: Websocket):
 
     you_host = len(clients) == 0
     clients.append(client_info)
+    ROOM_STATUS.setdefault(room_code, "lobby")
 
-    # Đồng bộ thông tin lên EdgeOne Blob
-    await sync_room_to_blob(room_code)
-
+    # Đồng bộ lên Blob — KHÔNG được chặn việc tạo phòng nếu Blob lỗi
     status_key = get_status_key(room_code)
-    status_data = await store.get(status_key, type="json")
-    if not status_data:
-        await store.set_json(status_key, {"status": "lobby"})
+    try:
+        await sync_room_to_blob(room_code)
+        status_data = await store.get(status_key, type="json")
+        if not status_data:
+            await store.set_json(status_key, {"status": "lobby"})
+    except Exception as e:
+        print(f"[WS] Blob sync skipped for {room_code}: {e}")
 
     # Gửi tin nhắn Welcome
     existing_peers = [
@@ -192,7 +214,10 @@ async def ws_relay(request, ws: Websocket):
                 client_info["name"] = str(m.get("name", client_info["name"]))
                 client_info["color"] = str(m.get("color", client_info["color"]))
 
-                await sync_room_to_blob(room_code)
+                try:
+                    await sync_room_to_blob(room_code)
+                except Exception as e:
+                    print(f"[WS] join blob sync failed: {e}")
 
                 await broadcast(
                     room_code,
@@ -212,9 +237,17 @@ async def ws_relay(request, ws: Websocket):
                 break
 
             elif t == "start":
-                await store.set_json(status_key, {"status": "battle"})
+                ROOM_STATUS[room_code] = "battle"
+                try:
+                    await store.set_json(status_key, {"status": "battle"})
+                except Exception as e:
+                    print(f"[WS] status sync failed: {e}")
             elif t == "lobby":
-                await store.set_json(status_key, {"status": "lobby"})
+                ROOM_STATUS[room_code] = "lobby"
+                try:
+                    await store.set_json(status_key, {"status": "lobby"})
+                except Exception as e:
+                    print(f"[WS] status sync failed: {e}")
 
             # Relay WebRTC Signaling & Game State sang các peer khác
             m["from"] = player_id
@@ -232,13 +265,17 @@ async def ws_relay(request, ws: Websocket):
 
             await broadcast(room_code, {"t": "peer-leave", "id": player_id})
 
-            if len(remaining_clients) == 0:
-                del CONNECTED_ROOMS[room_code]
-                await store.delete(get_room_key(room_code))
-                await store.delete(status_key)
-            else:
-                await sync_room_to_blob(room_code)
-                # Chuyển Host cho người chơi còn lại
-                await broadcast(
-                    room_code, {"t": "host", "id": remaining_clients[0]["id"]}
-                )
+            try:
+                if len(remaining_clients) == 0:
+                    del CONNECTED_ROOMS[room_code]
+                    ROOM_STATUS.pop(room_code, None)
+                    await store.delete(get_room_key(room_code))
+                    await store.delete(status_key)
+                else:
+                    await sync_room_to_blob(room_code)
+                    # Chuyển Host cho người chơi còn lại
+                    await broadcast(
+                        room_code, {"t": "host", "id": remaining_clients[0]["id"]}
+                    )
+            except Exception as e:
+                print(f"[WS] cleanup (blob) error for {room_code}: {e}")

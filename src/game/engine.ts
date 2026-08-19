@@ -332,7 +332,10 @@ export class Engine {
     net.onMsg = (m) => this.handleNet(m);
     net.onPeers = () => this.emitNet();
     net.onClose = () => this.handleDisconnect();
-    const wsUrl = `${urlBase.replace(/\/$/, "")}/ws?room=${encodeURIComponent(room)}`;
+    // Strip a trailing "/ws" too — older builds stored `.../ws` in localStorage,
+    // which would otherwise produce a double /ws/ws path.
+    const base = urlBase.replace(/\/$/, "").replace(/\/ws$/i, "");
+    const wsUrl = `${base}/ws?room=${encodeURIComponent(room)}`;
     try {
       // pick the first palette color nobody in the room already uses
       let myColor = PALETTE[0];
