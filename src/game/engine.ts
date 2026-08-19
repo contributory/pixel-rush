@@ -162,6 +162,52 @@ interface ShipState {
 interface SpawnEntry { at: number; type: EnemyType; x: number; phase: number }
 
 const HI_KEY = "pixelrush-hiscore";
+const PROGRESS_KEY = "pixelrush-progress";
+
+/** Solo run progress — persisted so the pilot can resume weapons + wave. */
+export interface RunProgress {
+  score: number;
+  wave: number;
+  weapons: WeaponType[];
+  bombs: number;
+  kills: number;
+  bestCombo: number;
+}
+
+export function loadRunProgress(): RunProgress | null {
+  try {
+    const raw = localStorage.getItem(PROGRESS_KEY);
+    if (!raw) return null;
+    const o = JSON.parse(raw) as Partial<RunProgress>;
+    const wave = Math.max(0, Math.floor(Number(o.wave) || 0));
+    if (wave < 1) return null;
+    const weapons = Array.isArray(o.weapons)
+      ? o.weapons.map(String).filter((w): w is WeaponType => WEAPON_TYPES.includes(w as WeaponType))
+      : ["pulse"];
+    return {
+      score: Math.max(0, Math.floor(Number(o.score) || 0)),
+      wave,
+      weapons: weapons.length ? weapons : ["pulse"],
+      bombs: Math.max(0, Math.min(9, Math.floor(Number(o.bombs) || 3))),
+      kills: Math.max(0, Math.floor(Number(o.kills) || 0)),
+      bestCombo: Math.max(0, Math.floor(Number(o.bestCombo) || 0)),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveRunProgress(p: RunProgress) {
+  try {
+    localStorage.setItem(PROGRESS_KEY, JSON.stringify(p));
+  } catch { /* ignore */ }
+}
+
+export function clearRunProgress() {
+  try {
+    localStorage.removeItem(PROGRESS_KEY);
+  } catch { /* ignore */ }
+}
 
 /* ============================================================ */
 export class Engine {
@@ -433,12 +479,15 @@ export class Engine {
 
   /* ---------------- public API ---------------- */
 
-  startSolo() {
+  startSolo(opts?: { continue?: boolean }) {
     this.disconnect();
     this.role = "solo";
     this.me = this.makeShip("p1", this.loadName(), PALETTE[0]);
     this.players = new Map([[this.me.id, this.me]]);
-    this.startMatch();
+    const cont = !!opts?.continue;
+    const prog = cont ? loadRunProgress() : null;
+    if (!cont) clearRunProgress();
+    this.startMatch(prog);
     this.emitNet();
     audio.select();
   }
@@ -503,9 +552,15 @@ export class Engine {
       this.net.send({ t: "start" });
       this.startMatch();
     } else {
+      // PLAY AGAIN: ván mới từ đầu; tiến độ solo vẫn giữ để CONTINUE từ menu
       this.startMatch();
     }
     audio.select();
+  }
+
+  /** Đọc tiến độ solo đã lưu (menu CONTINUE). */
+  getSavedProgress(): RunProgress | null {
+    return loadRunProgress();
   }
 
   quitToMenu() {
@@ -546,11 +601,22 @@ export class Engine {
 
   /* ---------------- match flow ---------------- */
 
-  private startMatch() {
-    this.resetWorld();
+  private startMatch(progress: RunProgress | null = null) {
+    this.resetWorld(progress);
     if (this.role === "host") this.ensurePeerPlayers();
     this.setPhase("playing");
-    this.nextWave();
+    if (progress && progress.wave >= 1) {
+      // Resume at the saved wave (nextWave increments, so seed wave-1).
+      this.wave = Math.max(0, progress.wave - 1);
+      this.nextWave();
+      this.showBanner(
+        `WAVE ${this.wave}`,
+        "mission resumed — keep your arsenal",
+        "#ffd23f",
+      );
+    } else {
+      this.nextWave();
+    }
   }
 
   /** Host bấm bắt đầu trận co-op (hoặc chơi solo nếu chưa nối mạng). */
@@ -576,38 +642,45 @@ export class Engine {
     }
   }
 
-  private resetWorld() {
+  private resetWorld(progress: RunProgress | null = null) {
     this.bullets = [];
     this.enemies = [];
     this.picks = [];
     this.parts = [];
     this.pops = [];
     this.spawnQueue = [];
-    this.score = 0;
+    this.score = progress ? progress.score : 0;
     this.wave = 0;
     this.combo = 0;
-    this.bestCombo = 0;
+    this.bestCombo = progress ? progress.bestCombo : 0;
     this.comboT = 0;
     this.mult = 1;
-    this.kills = 0;
+    this.kills = progress ? progress.kills : 0;
     this.waveT = 0;
     this.waveClearT = -1;
     this.shake = 0;
     this.flashRed = 0;
     this.flashWhite = 0;
     this.banner = null;
-    // đưa phi công về vị trí xuất phát
-    this.spreadPlayers();
+    // đưa phi công về vị trí xuất phát (có thể giữ vũ khí từ progress)
+    this.spreadPlayers(progress);
   }
 
-  private spreadPlayers() {
+  private spreadPlayers(progress: RunProgress | null = null) {
     const n = this.players.size;
     let i = 0;
     for (const s of this.players.values()) {
       s.alive = true;
       s.lives = 2;
-      s.weapons = ["pulse"];
-      s.bombs = 3;
+      // Chỉ pilot solo nhận vũ khí đã lưu; co-op vẫn bắt đầu pulse.
+      if (progress && s === this.me && this.role === "solo") {
+        s.weapons = [...progress.weapons];
+        if (!s.weapons.length) s.weapons = ["pulse"];
+        s.bombs = progress.bombs;
+      } else {
+        s.weapons = ["pulse"];
+        s.bombs = 3;
+      }
       s.inv = 2;
       s.respawn = Infinity;
       s.cool = 0;
@@ -659,7 +732,7 @@ export class Engine {
     
     let t = 0.4;
     // hàng drone bay lượn
-    const drones = 4 + Math.min(6, w);
+    const drones = 4 + Math.min(10, Math.floor(w * 1.2));
     for (let i = 0; i < drones; i++) {
       q.push({ at: t, type: "drone", x: xAt(rand(0.12, 0.88)), phase: rand(0, TAU) });
       t += rand(0.22, 0.4);
@@ -746,8 +819,13 @@ export class Engine {
 
   private spawnEnemy(type: EnemyType, x: number, phase: number) {
     const w = this.wave;
-    // Giảm độ khó đầu game: scaling HP chậm hơn cho các wave đầu
-    const difficultyMultiplier = w <= 5 ? 0.7 : w <= 10 ? 0.85 : 1.0;
+    // Độ khó tăng dần: dễ hơn ở đầu, scale mạnh hơn từ wave 10+
+    const difficultyMultiplier =
+      w <= 3 ? 0.55 :
+      w <= 6 ? 0.7 :
+      w <= 10 ? 0.85 :
+      w <= 15 ? 1.0 :
+      1.0 + (w - 15) * 0.06;
     const hp =
       type === "drone" ? Math.max(1, Math.floor(1 * difficultyMultiplier)) :
       type === "dart" ? Math.max(1, Math.floor(1 * difficultyMultiplier)) :
@@ -1212,6 +1290,7 @@ export class Engine {
         this.score += 200 * this.wave;
         audio.power();
         this.nextWave();
+        this.persistProgress(); // checkpoint: lưu wave sắp chơi + vũ khí
       }
 
       // pickups rơi
@@ -1375,6 +1454,21 @@ export class Engine {
     this.pressed.clear();
   }
 
+  /** Lưu tiến độ solo: wave, score, vũ khí đang sở hữu. */
+  private persistProgress() {
+    if (this.role !== "solo") return;
+    if (this.wave < 1) return;
+    const weapons = this.me?.weapons?.length ? [...this.me.weapons] : ["pulse"];
+    saveRunProgress({
+      score: this.score,
+      wave: this.wave,
+      weapons,
+      bombs: this.me?.bombs ?? 3,
+      kills: this.kills,
+      bestCombo: this.bestCombo,
+    });
+  }
+
   private checkGameOver() {
     if (this.phase !== "playing") return;
     let anyAlive = false;
@@ -1384,6 +1478,8 @@ export class Engine {
 
   private endGame() {
     if (this.phase === "gameover") return;
+    // Checkpoint: giữ wave/score/vũ khí để lần sau CONTINUE đúng chỗ
+    this.persistProgress();
     let newRecord = false;
     if (this.score > this.hi) {
       this.hi = this.score;

@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Engine,
+  loadRunProgress,
   type HudData,
   type NetInfo,
   type OverStats,
   type Phase,
+  type RunProgress,
 } from "./game/engine";
 import { audio, type BgmSource } from "./game/audio";
 import { defaultWsUrl, fetchRooms, type RoomInfo } from "./game/net";
@@ -202,6 +204,8 @@ interface MenuProps {
   roomsErr: boolean;
   refreshRooms: () => void;
   onSolo: () => void;
+  onContinue: () => void;
+  progress: RunProgress | null;
   onCreate: () => void;
   onJoin: (code: string) => void;
 }
@@ -244,12 +248,27 @@ function MenuScreen(p: MenuProps) {
           </p>
 
           <div className="mt-7 flex flex-col gap-3 max-w-md">
+            {p.progress && (
+              <button
+                onClick={p.onContinue}
+                className="btn-arcade panel-clip bg-gold text-ink text-sm px-6 py-4 flex flex-col gap-1"
+              >
+                <div className="flex items-center justify-between w-full">
+                  <span>▶ CONTINUE</span>
+                  <span className="text-[8px] opacity-80">WAVE {p.progress.wave}</span>
+                </div>
+                <div className="flex items-center justify-between w-full text-[8px] opacity-75 font-display">
+                  <span>SCORE {String(p.progress.score).padStart(7, "0")}</span>
+                  <span>{p.progress.weapons.length} WPN · {p.progress.bombs} BOMB</span>
+                </div>
+              </button>
+            )}
             <button
               onClick={p.onSolo}
               className="btn-arcade panel-clip bg-neon text-ink text-sm px-6 py-4 flex items-center justify-between"
             >
               <span>▶ SOLO PLAY</span>
-              <span className="text-[8px] opacity-70">1 PLAYER</span>
+              <span className="text-[8px] opacity-70">{p.progress ? "NEW RUN" : "1 PLAYER"}</span>
             </button>
 
             {/* ------ co-op: create / join ------ */}
@@ -788,6 +807,11 @@ function GameOverScreen({
         {s.newRecord && (
           <div className="blink font-display text-[10px] text-gold mt-3">★ NEW RECORD ★</div>
         )}
+        {hud.role === "solo" && s.wave >= 1 && (
+          <div className="font-display text-[8px] text-neon mt-3 opacity-80">
+            PROGRESS SAVED — CONTINUE FROM WAVE {s.wave}
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-3 mt-6 text-left">
           {[
             ["SCORE", String(s.score).padStart(7, "0"), "#eaf6ff"],
@@ -868,6 +892,7 @@ export default function App() {
   const [rooms, setRooms] = useState<RoomInfo[]>([]);
   const [roomsErr, setRoomsErr] = useState(false);
   const [roomsScan, setRoomsScan] = useState(0);
+  const [progress, setProgress] = useState<RunProgress | null>(() => loadRunProgress());
 
   const setName = (v: string) => {
     setNameState(v);
@@ -890,6 +915,7 @@ export default function App() {
       onPhase: (p, stats) => {
         setPhase(p);
         if (p === "gameover") setOverStats(stats ?? null);
+        if (p === "menu" || p === "gameover") setProgress(loadRunProgress());
       },
       onHud: setHud,
       onNet: setNet,
@@ -1019,7 +1045,9 @@ export default function App() {
           rooms={rooms}
           roomsErr={roomsErr}
           refreshRooms={() => setRoomsScan((n) => n + 1)}
-          onSolo={() => eng()?.startSolo()}
+          onSolo={() => { eng()?.startSolo(); setProgress(null); }}
+          onContinue={() => eng()?.startSolo({ continue: true })}
+          progress={progress}
           onCreate={handleCreate}
           onJoin={handleJoin}
         />
