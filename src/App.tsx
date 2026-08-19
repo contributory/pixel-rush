@@ -1016,7 +1016,7 @@ export default function App() {
       {/* music toggle — always on top */}
       <button
         onClick={() => eng()?.toggleMute()}
-        title="Toggle sound (M)"
+        title="Mute / play music (M) — click to start BGM if blocked by browser"
         className="absolute top-3 left-1/2 -translate-x-1/2 z-40 hud-chip panel-clip px-3 py-2 flex items-center gap-2 text-snow hover:text-neon transition-colors cursor-pointer"
       >
         <SpeakerIcon muted={hud?.muted ?? audio.muted} />
@@ -1026,8 +1026,8 @@ export default function App() {
             : bgm.playing
               ? bgm.source === "synth"
                 ? "CHIPTUNE"
-                : "BGM"
-              : "TAP TO PLAY"}
+                : "BGM ON"
+              : "TAP FOR MUSIC"}
         </span>
         {bgm.playing && !(hud?.muted ?? false) && <EqBars />}
       </button>

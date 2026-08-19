@@ -70,6 +70,10 @@ class AudioSys {
       el.addEventListener("pause", () => this.emit());
       el.addEventListener("ended", () => this.emit());
       this.emit();
+      // If a gesture already unlocked audio, start now.
+      if (!this.muted) {
+        void el.play().then(() => this.emit()).catch(() => { /* wait for explicit resume */ });
+      }
     };
 
     const fallbackSynth = () => {
@@ -102,21 +106,54 @@ class AudioSys {
     }, { once: true });
   }
 
-  resume() {
-    const ctx = this.ensure();
-    if (ctx?.state === "suspended") ctx.resume().catch(() => {});
+  /** True when BGM (file or synth loop) is actively playing. */
+  get isBgmPlaying(): boolean {
+    return (this.bgm !== null && !this.bgm.paused) || this.synthTimer !== null;
+  }
 
-    if (this.bgm && this.bgmSource !== "synth" && this.bgm.paused && !this.muted) {
-      this.bgm.play().catch(() => {
-        // If the file cannot be played in this browser, use the WebAudio
-        // fallback. This also avoids Chrome's silent autoplay failure.
-        if (this.bgmSource !== "synth") {
-          this.bgm = null;
-          this.startSynth();
-        }
-      });
+  resume() {
+    // Must be called from a user gesture on Chrome (autoplay policy).
+    this.init();
+    const ctx = this.ensure();
+    if (ctx?.state === "suspended") {
+      void ctx.resume().catch(() => {});
     }
-    if (this.bgmSource === "synth" && this.synthTimer === null) this.startSynth();
+
+    if (this.muted) {
+      this.emit();
+      return;
+    }
+
+    if (this.bgm && this.bgmSource !== "synth") {
+      if (this.bgm.paused) {
+        void this.bgm.play().then(() => this.emit()).catch(() => {
+          // File blocked or missing — fall back to WebAudio chiptune.
+          if (this.bgmSource !== "synth") {
+            try { this.bgm?.pause(); } catch { /* ignore */ }
+            this.bgm = null;
+            this.startSynth();
+          }
+        });
+      }
+    } else if (this.bgmSource === "synth" || this.bgmSource === "none") {
+      if (this.synthTimer === null) this.startSynth();
+    } else if (!this.bgm && !this.bgmStarting) {
+      // Still loading; kick synth so the user hears something immediately.
+      this.startSynth();
+    }
+    this.emit();
+  }
+
+  pauseBgm() {
+    if (this.bgm && !this.bgm.paused) {
+      try { this.bgm.pause(); } catch { /* ignore */ }
+    }
+    // Synth keeps its timer but notes are silenced via muted / we stop it for true pause.
+    if (this.synthTimer !== null) {
+      window.clearInterval(this.synthTimer);
+      this.synthTimer = null;
+    }
+    this.emit();
   }
 
   /** Nhạc nền dự phòng: vòng chiptune tổng hợp nếu không có file MP3. */
@@ -148,7 +185,32 @@ class AudioSys {
     }
     if (this.master) this.master.gain.value = m ? 0 : 0.55;
     if (this.bgm) this.bgm.volume = m ? 0 : 0.5;
+    if (m) {
+      this.pauseBgm();
+    } else {
+      // Unmute from a click = valid Chrome user gesture → start playback.
+      this.resume();
+    }
     this.emit();
+  }
+
+  /**
+   * Mute button behaviour:
+   *  - muted  → unmute + play
+   *  - unmuted but music not playing → play (Chrome autoplay unlock)
+   *  - unmuted and playing → mute + pause
+   */
+  toggleMuteOrPlay() {
+    this.init();
+    if (this.muted) {
+      this.setMuted(false);
+      return;
+    }
+    if (!this.isBgmPlaying) {
+      this.resume();
+      return;
+    }
+    this.setMuted(true);
   }
 
   /* ---------- hiệu ứng ---------- */

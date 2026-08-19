@@ -442,7 +442,7 @@ export class Engine {
     if (!e.repeat) {
       this.pressed.add(e.code);
       if (e.code === "KeyM") {
-        audio.setMuted(!audio.muted);
+        this.toggleMute();
       }
       // Ctrl để hiện chuột
       if (e.code === "ControlLeft" || e.code === "ControlRight") {
@@ -598,7 +598,8 @@ export class Engine {
   }
 
   toggleMute() {
-    audio.setMuted(!audio.muted);
+    // Also acts as play/pause for BGM — unlocks Chrome autoplay on first click.
+    audio.toggleMuteOrPlay();
     this.pushHud(true);
   }
 
