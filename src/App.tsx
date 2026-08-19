@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Engine,
-  loadRunProgress,
+  loadPlayerProfile,
   type HudData,
   type NetInfo,
   type OverStats,
   type Phase,
-  type RunProgress,
+  type PlayerProfile,
 } from "./game/engine";
 import { audio, type BgmSource } from "./game/audio";
 import { defaultWsUrl, fetchRooms, normalizeWsOrigin, type RoomInfo } from "./game/net";
@@ -204,8 +204,7 @@ interface MenuProps {
   roomsErr: boolean;
   refreshRooms: () => void;
   onSolo: () => void;
-  onContinue: () => void;
-  progress: RunProgress | null;
+  profile: PlayerProfile;
   onCreate: () => void;
   onJoin: (code: string) => void;
 }
@@ -248,27 +247,26 @@ function MenuScreen(p: MenuProps) {
           </p>
 
           <div className="mt-7 flex flex-col gap-3 max-w-md">
-            {p.progress && (
-              <button
-                onClick={p.onContinue}
-                className="btn-arcade panel-clip bg-gold text-ink text-sm px-6 py-4 flex flex-col gap-1"
-              >
-                <div className="flex items-center justify-between w-full">
-                  <span>▶ CONTINUE</span>
-                  <span className="text-[8px] opacity-80">WAVE {p.progress.wave}</span>
+            {/* Pilot account — arsenal & wave persist across matches */}
+            {(p.profile.wave > 1 || p.profile.weapons.length > 1 || p.profile.score > 0) && (
+              <div className="panel-clip bg-panel/80 border border-gold/50 px-4 py-3">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-display text-[8px] text-gold tracking-wider">PILOT ACCOUNT</span>
+                  <span className="font-display text-[7px] text-dim">NOT RESET EACH MATCH</span>
                 </div>
-                <div className="flex items-center justify-between w-full text-[8px] opacity-75 font-display">
-                  <span>SCORE {String(p.progress.score).padStart(7, "0")}</span>
-                  <span>{p.progress.weapons.length} WPN · {p.progress.bombs} BOMB</span>
+                <div className="flex items-center justify-between font-display text-[9px]">
+                  <span className="text-neon">WAVE {p.profile.wave}</span>
+                  <span className="text-snow">SCORE {String(p.profile.score).padStart(7, "0")}</span>
+                  <span className="text-acid">{p.profile.weapons.length} WPN</span>
                 </div>
-              </button>
+              </div>
             )}
             <button
               onClick={p.onSolo}
               className="btn-arcade panel-clip bg-neon text-ink text-sm px-6 py-4 flex items-center justify-between"
             >
               <span>▶ SOLO PLAY</span>
-              <span className="text-[8px] opacity-70">{p.progress ? "NEW RUN" : "1 PLAYER"}</span>
+              <span className="text-[8px] opacity-70">1 PLAYER</span>
             </button>
 
             {/* ------ pilot display name (always editable) ------ */}
@@ -819,7 +817,7 @@ function GameOverScreen({
         )}
         {hud.role === "solo" && s.wave >= 1 && (
           <div className="font-display text-[8px] text-neon mt-3 opacity-80">
-            PROGRESS SAVED — CONTINUE FROM WAVE {s.wave}
+            ACCOUNT SAVED — ARSENAL & WAVE {s.wave} KEEP FOR NEXT MATCH
           </div>
         )}
         <div className="grid grid-cols-2 gap-3 mt-6 text-left">
@@ -902,7 +900,7 @@ export default function App() {
   const [rooms, setRooms] = useState<RoomInfo[]>([]);
   const [roomsErr, setRoomsErr] = useState(false);
   const [roomsScan, setRoomsScan] = useState(0);
-  const [progress, setProgress] = useState<RunProgress | null>(() => loadRunProgress());
+  const [profile, setProfile] = useState<PlayerProfile>(() => loadPlayerProfile());
 
   const setName = (v: string) => {
     setNameState(v);
@@ -925,7 +923,7 @@ export default function App() {
       onPhase: (p, stats) => {
         setPhase(p);
         if (p === "gameover") setOverStats(stats ?? null);
-        if (p === "menu" || p === "gameover") setProgress(loadRunProgress());
+        if (p === "menu" || p === "gameover") setProfile(loadPlayerProfile());
       },
       onHud: setHud,
       onNet: setNet,
@@ -1069,9 +1067,8 @@ export default function App() {
           rooms={rooms}
           roomsErr={roomsErr}
           refreshRooms={() => setRoomsScan((n) => n + 1)}
-          onSolo={() => { eng()?.startSolo(); setProgress(null); }}
-          onContinue={() => eng()?.startSolo({ continue: true })}
-          progress={progress}
+          onSolo={() => eng()?.startSolo()}
+          profile={profile}
           onCreate={handleCreate}
           onJoin={handleJoin}
         />

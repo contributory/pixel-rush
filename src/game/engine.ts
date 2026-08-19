@@ -162,10 +162,11 @@ interface ShipState {
 interface SpawnEntry { at: number; type: EnemyType; x: number; phase: number }
 
 const HI_KEY = "pixelrush-hiscore";
-const PROGRESS_KEY = "pixelrush-progress";
+/** Solo pilot account — never wiped between matches. */
+const PROFILE_KEY = "pixelrush-profile";
 
-/** Solo run progress — persisted so the pilot can resume weapons + wave. */
-export interface RunProgress {
+/** Persistent solo pilot profile (account-style, not a mid-run CONTINUE). */
+export interface PlayerProfile {
   score: number;
   wave: number;
   weapons: WeaponType[];
@@ -174,38 +175,58 @@ export interface RunProgress {
   bestCombo: number;
 }
 
-export function loadRunProgress(): RunProgress | null {
+/** @deprecated alias kept so older imports still typecheck */
+export type RunProgress = PlayerProfile;
+
+const DEFAULT_PROFILE = (): PlayerProfile => ({
+  score: 0,
+  wave: 1,
+  weapons: ["pulse"],
+  bombs: 3,
+  kills: 0,
+  bestCombo: 0,
+});
+
+export function loadPlayerProfile(): PlayerProfile {
   try {
-    const raw = localStorage.getItem(PROGRESS_KEY);
-    if (!raw) return null;
-    const o = JSON.parse(raw) as Partial<RunProgress>;
-    const wave = Math.max(0, Math.floor(Number(o.wave) || 0));
-    if (wave < 1) return null;
+    const raw = localStorage.getItem(PROFILE_KEY) ?? localStorage.getItem("pixelrush-progress");
+    if (!raw) return DEFAULT_PROFILE();
+    const o = JSON.parse(raw) as Partial<PlayerProfile>;
     const weapons = Array.isArray(o.weapons)
       ? o.weapons.map(String).filter((w): w is WeaponType => WEAPON_TYPES.includes(w as WeaponType))
       : ["pulse"];
+    if (!weapons.includes("pulse")) weapons.unshift("pulse");
     return {
       score: Math.max(0, Math.floor(Number(o.score) || 0)),
-      wave,
+      wave: Math.max(1, Math.floor(Number(o.wave) || 1)),
       weapons: weapons.length ? weapons : ["pulse"],
       bombs: Math.max(0, Math.min(9, Math.floor(Number(o.bombs) || 3))),
       kills: Math.max(0, Math.floor(Number(o.kills) || 0)),
       bestCombo: Math.max(0, Math.floor(Number(o.bestCombo) || 0)),
     };
   } catch {
-    return null;
+    return DEFAULT_PROFILE();
   }
 }
 
-function saveRunProgress(p: RunProgress) {
+/** @deprecated use loadPlayerProfile */
+export function loadRunProgress(): PlayerProfile | null {
+  const p = loadPlayerProfile();
+  return p.wave > 1 || p.weapons.length > 1 || p.score > 0 ? p : null;
+}
+
+function savePlayerProfile(p: PlayerProfile) {
   try {
-    localStorage.setItem(PROGRESS_KEY, JSON.stringify(p));
+    localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
+    // keep legacy key in sync for older builds
+    localStorage.setItem("pixelrush-progress", JSON.stringify(p));
   } catch { /* ignore */ }
 }
 
-export function clearRunProgress() {
+export function clearPlayerProfile() {
   try {
-    localStorage.removeItem(PROGRESS_KEY);
+    localStorage.removeItem(PROFILE_KEY);
+    localStorage.removeItem("pixelrush-progress");
   } catch { /* ignore */ }
 }
 
@@ -479,15 +500,13 @@ export class Engine {
 
   /* ---------------- public API ---------------- */
 
-  startSolo(opts?: { continue?: boolean }) {
+  startSolo() {
     this.disconnect();
     this.role = "solo";
     this.me = this.makeShip("p1", this.loadName(), PALETTE[0]);
     this.players = new Map([[this.me.id, this.me]]);
-    const cont = !!opts?.continue;
-    const prog = cont ? loadRunProgress() : null;
-    if (!cont) clearRunProgress();
-    this.startMatch(prog);
+    // Always load the pilot account — arsenal / wave are never wiped between matches.
+    this.startMatch(loadPlayerProfile());
     this.emitNet();
     audio.select();
   }
@@ -563,9 +582,9 @@ export class Engine {
     audio.select();
   }
 
-  /** Đọc tiến độ solo đã lưu (menu CONTINUE). */
-  getSavedProgress(): RunProgress | null {
-    return loadRunProgress();
+  /** Pilot account (menu stats). */
+  getPlayerProfile(): PlayerProfile {
+    return loadPlayerProfile();
   }
 
   quitToMenu() {
@@ -606,19 +625,22 @@ export class Engine {
 
   /* ---------------- match flow ---------------- */
 
-  private startMatch(progress: RunProgress | null = null) {
-    this.resetWorld(progress);
+  private startMatch(profile: PlayerProfile | null = null) {
+    // Solo always carries the pilot account; co-op stays a fresh pulse loadout.
+    const account = this.role === "solo" ? (profile ?? loadPlayerProfile()) : null;
+    this.resetWorld(account);
     if (this.role === "host") this.ensurePeerPlayers();
     this.setPhase("playing");
-    if (progress && progress.wave >= 1) {
-      // Resume at the saved wave (nextWave increments, so seed wave-1).
-      this.wave = Math.max(0, progress.wave - 1);
+    if (account && account.wave >= 1) {
+      this.wave = Math.max(0, account.wave - 1);
       this.nextWave();
-      this.showBanner(
-        `WAVE ${this.wave}`,
-        "mission resumed — keep your arsenal",
-        "#ffd23f",
-      );
+      if (account.wave > 1 || account.weapons.length > 1) {
+        this.showBanner(
+          `WAVE ${this.wave}`,
+          "pilot account loaded",
+          "#ffd23f",
+        );
+      }
     } else {
       this.nextWave();
     }
@@ -647,41 +669,42 @@ export class Engine {
     }
   }
 
-  private resetWorld(progress: RunProgress | null = null) {
+  private resetWorld(profile: PlayerProfile | null = null) {
     this.bullets = [];
     this.enemies = [];
     this.picks = [];
     this.parts = [];
     this.pops = [];
     this.spawnQueue = [];
-    this.score = progress ? progress.score : 0;
+    // Account carries score / kills / best combo across matches (solo only).
+    this.score = profile ? profile.score : 0;
     this.wave = 0;
     this.combo = 0;
-    this.bestCombo = progress ? progress.bestCombo : 0;
+    this.bestCombo = profile ? profile.bestCombo : 0;
     this.comboT = 0;
     this.mult = 1;
-    this.kills = progress ? progress.kills : 0;
+    this.kills = profile ? profile.kills : 0;
     this.waveT = 0;
     this.waveClearT = -1;
     this.shake = 0;
     this.flashRed = 0;
     this.flashWhite = 0;
     this.banner = null;
-    // đưa phi công về vị trí xuất phát (có thể giữ vũ khí từ progress)
-    this.spreadPlayers(progress);
+    this.spreadPlayers(profile);
   }
 
-  private spreadPlayers(progress: RunProgress | null = null) {
+  private spreadPlayers(profile: PlayerProfile | null = null) {
     const n = this.players.size;
     let i = 0;
     for (const s of this.players.values()) {
       s.alive = true;
       s.lives = 2;
-      // Chỉ pilot solo nhận vũ khí đã lưu; co-op vẫn bắt đầu pulse.
-      if (progress && s === this.me && this.role === "solo") {
-        s.weapons = [...progress.weapons];
+      // Solo pilot keeps unlocked arsenal; co-op still starts with pulse.
+      if (profile && s === this.me && this.role === "solo") {
+        s.weapons = [...profile.weapons];
+        if (!s.weapons.includes("pulse")) s.weapons.unshift("pulse");
         if (!s.weapons.length) s.weapons = ["pulse"];
-        s.bombs = progress.bombs;
+        s.bombs = Math.max(3, profile.bombs);
       } else {
         s.weapons = ["pulse"];
         s.bombs = 3;
@@ -1295,7 +1318,7 @@ export class Engine {
         this.score += 200 * this.wave;
         audio.power();
         this.nextWave();
-        this.persistProgress(); // checkpoint: lưu wave sắp chơi + vũ khí
+        this.persistProfile(); // checkpoint: lưu wave sắp chơi + vũ khí
       }
 
       // pickups rơi
@@ -1459,18 +1482,20 @@ export class Engine {
     this.pressed.clear();
   }
 
-  /** Lưu tiến độ solo: wave, score, vũ khí đang sở hữu. */
-  private persistProgress() {
+  /** Write the solo pilot account (never clears between matches). */
+  private persistProfile() {
     if (this.role !== "solo") return;
-    if (this.wave < 1) return;
+    const prev = loadPlayerProfile();
     const weapons = this.me?.weapons?.length ? [...this.me.weapons] : ["pulse"];
-    saveRunProgress({
-      score: this.score,
-      wave: this.wave,
-      weapons,
-      bombs: this.me?.bombs ?? 3,
-      kills: this.kills,
-      bestCombo: this.bestCombo,
+    // Merge unlocks so we never lose a weapon the pilot already owned.
+    const merged = new Set<WeaponType>(["pulse", ...prev.weapons, ...weapons]);
+    savePlayerProfile({
+      score: Math.max(prev.score, this.score),
+      wave: Math.max(prev.wave, this.wave, 1),
+      weapons: WEAPON_TYPES.filter((w) => merged.has(w)),
+      bombs: Math.max(prev.bombs, this.me?.bombs ?? 3),
+      kills: Math.max(prev.kills, this.kills),
+      bestCombo: Math.max(prev.bestCombo, this.bestCombo),
     });
   }
 
@@ -1483,8 +1508,8 @@ export class Engine {
 
   private endGame() {
     if (this.phase === "gameover") return;
-    // Checkpoint: giữ wave/score/vũ khí để lần sau CONTINUE đúng chỗ
-    this.persistProgress();
+    // Update pilot account (arsenal + highest wave) — not wiped next match
+    this.persistProfile();
     let newRecord = false;
     if (this.score > this.hi) {
       this.hi = this.score;
@@ -1613,6 +1638,8 @@ export class Engine {
       if (!me.weapons.includes(type)) {
         me.weapons.push(type);
         this.pop(me.x, me.y - 30, `${WEAPON_LABEL[type]} ONLINE`, "#ffd23f", true);
+        // Unlock into the pilot account immediately so the next match keeps it.
+        this.persistProfile();
       } else {
         this.score += 750;
         this.pop(me.x, me.y - 30, "+750", "#ffd23f");
