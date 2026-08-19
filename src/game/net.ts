@@ -28,6 +28,10 @@ export function httpBase(wsUrl: string): string {
  */
 export function defaultWsUrl(): string {
   const proto = window.location.protocol === "https:" ? "wss://" : "ws://";
+  // For production deployment at pixel-rush.edgeone.dev, use the full URL with /ws path
+  if (window.location.host.includes("edgeone.dev") || window.location.host.includes("pixel-rush")) {
+    return `${proto}${window.location.host}/ws`;
+  }
   return `${proto}${window.location.host}`;
 }
 
