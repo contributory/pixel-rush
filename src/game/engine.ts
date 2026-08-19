@@ -25,7 +25,7 @@ export interface HudPlayer {
   color: string;
   lives: number;
   alive: boolean;
-  weapon: number;
+  weapons: WeaponType[];
   bombs: number;
   local: boolean;
 }
@@ -133,7 +133,13 @@ interface Enemy {
   tx: number; ty: number; thp: number;
   dead?: boolean;
 }
-type PickType = "W" | "B" | "H" | "S" | "F" | "M" | "D";
+export type WeaponType = "pulse" | "spread" | "laser" | "missile" | "sidewinder" | "plasma" | "burst" | "orbit" | "rail" | "nova";
+const WEAPON_TYPES: WeaponType[] = ["pulse", "spread", "laser", "missile", "sidewinder", "plasma", "burst", "orbit", "rail", "nova"];
+const WEAPON_LABEL: Record<WeaponType, string> = {
+  pulse: "PULSE", spread: "SPREAD", laser: "LASER", missile: "MISSILE", sidewinder: "SIDEWINDER",
+  plasma: "PLASMA", burst: "BURST", orbit: "ORBIT", rail: "RAIL", nova: "NOVA",
+};
+type PickType = WeaponType | "B" | "H";
 interface Pickup {
   id: number; type: PickType; x: number; y: number; t: number;
   tx: number; ty: number; dead?: boolean;
@@ -149,7 +155,7 @@ interface Pop {
 interface ShipState {
   id: string; name: string; color: string;
   x: number; y: number; vx: number;
-  alive: boolean; lives: number; weapon: number; bombs: number;
+  alive: boolean; lives: number; weapons: WeaponType[]; bombs: number;
   firing: boolean; cool: number; inv: number; respawn: number;
   tx: number; ty: number;
 }
@@ -325,7 +331,7 @@ export class Engine {
     return {
       id, name, color,
       x: this.W / 2, y: this.H - 120, vx: 0,
-      alive: true, lives: 2, weapon: 1, bombs: 3,
+      alive: true, lives: 2, weapons: ["pulse"], bombs: 3,
       firing: false, cool: 0, inv: 2, respawn: Infinity,
       tx: this.W / 2, ty: this.H - 120,
     };
@@ -532,7 +538,7 @@ export class Engine {
       bossMax: boss ? boss.maxHp : 0,
       players: [...this.players.values()].map((s) => ({
         id: s.id, name: s.name, color: s.color, lives: s.lives,
-        alive: s.alive, weapon: s.weapon, bombs: s.bombs, local: s === this.me,
+        alive: s.alive, weapons: [...s.weapons], bombs: s.bombs, local: s === this.me,
       })),
       muted: audio.muted,
     };
@@ -548,8 +554,20 @@ export class Engine {
   }
 
   /** Host bấm bắt đầu trận co-op (hoặc chơi solo nếu chưa nối mạng). */
-  hostStart() {
+  async hostStart() {
     if (this.role === "host" && this.net?.open) {
+      // Co-op uses WebRTC only after the second player is present and the host
+      // explicitly starts the mission. Do not create a peer connection in the lobby.
+      if (this.net.peers.length !== 1) {
+        this.showBanner("WAITING FOR PILOT", "2 players are required to start co-op", "#ff2d78");
+        return;
+      }
+      try {
+        await this.net.startWebRTC();
+      } catch (e) {
+        this.showBanner("LINK FAILED", e instanceof Error ? e.message : "WebRTC setup failed", "#ff2d78");
+        return;
+      }
       this.net.send({ t: "start" });
       this.startMatch();
       audio.select();
@@ -588,7 +606,7 @@ export class Engine {
     for (const s of this.players.values()) {
       s.alive = true;
       s.lives = 2;
-      s.weapon = 1;
+      s.weapons = ["pulse"];
       s.bombs = 3;
       s.inv = 2;
       s.respawn = Infinity;
@@ -888,7 +906,10 @@ export class Engine {
         s.vx = Number(m.vx ?? 0);
         s.alive = !!m.alive;
         s.lives = Number(m.lives ?? 0);
-        s.weapon = Number(m.weapon ?? 1);
+        s.weapons = Array.isArray(m.weapons)
+          ? (m.weapons.map(String).filter((w): w is WeaponType => WEAPON_TYPES.includes(w as WeaponType)))
+          : ["pulse"];
+        if (!s.weapons.length) s.weapons = ["pulse"];
         s.bombs = Number(m.bombs ?? 0);
         s.firing = !!m.firing;
         s.name = String(m.name ?? s.name);
@@ -1023,7 +1044,7 @@ export class Engine {
       x: Math.round(this.me.x), y: Math.round(this.me.y),
       vx: Math.round(this.me.vx),
       alive: this.me.alive, lives: this.me.lives,
-      weapon: this.me.weapon, bombs: this.me.bombs,
+      weapons: [...this.me.weapons], bombs: this.me.bombs,
       firing: this.me.firing, name: this.me.name, color: this.me.color,
     });
   }
@@ -1148,7 +1169,6 @@ export class Engine {
         me.x = this.W / 2;
         me.y = this.H - 120;
         me.inv = 2.5;
-        me.weapon = Math.max(1, me.weapon - 1);
         this.ring(me.x, me.y, me.color);
         audio.power();
       }
@@ -1186,17 +1206,12 @@ export class Engine {
       for (const e of this.enemies) this.updateEnemy(e, dt);
       this.enemies = this.enemies.filter((e) => !e.dead && e.y < this.H + 70 && e.y > -160);
 
-      // hết wave
+      // Hết wave là vào wave tiếp theo ngay lập tức — không có thời gian nghỉ.
       if (this.spawnQueue.length === 0 && this.enemies.length === 0) {
-        if (this.waveClearT < 0) {
-          this.waveClearT = 1.4;
-          this.showBanner("WAVE CLEAR", `+${200 * this.wave} bonus pts`, "#7dff5e");
-          this.score += 200 * this.wave;
-          audio.power();
-        } else {
-          this.waveClearT -= dt;
-          if (this.waveClearT <= 0) this.nextWave();
-        }
+        this.showBanner("WAVE CLEAR", `+${200 * this.wave} bonus pts`, "#7dff5e");
+        this.score += 200 * this.wave;
+        audio.power();
+        this.nextWave();
       }
 
       // pickups rơi
@@ -1389,38 +1404,65 @@ export class Engine {
   /* ---------------- hành động ---------------- */
 
   private firePlayer(s: ShipState) {
-    const lvl = s.weapon;
-    // Cải thiện vũ khí: tăng tốc độ bắn và damage ở các cấp độ cao
-    s.cool = [0.14, 0.12, 0.10, 0.09][lvl - 1]; // tăng tốc độ bắn
-    const mk = (x: number, y: number, vx: number, vy: number, dmg: number, color: string, homing = false) => {
-      const b: Bullet = { x, y, vx, vy, dmg, r: 4, from: "p", color, homing };
+    const weapons = s.weapons.length ? s.weapons : ["pulse"];
+    const mk = (x: number, y: number, vx: number, vy: number, dmg: number, color: string, homing = false, r = 4) => {
+      const b: Bullet = { x, y, vx, vy, dmg, r, from: "p", color, homing };
       this.bullets.push(b);
       if (s === this.me && this.net?.open) {
-        this.net?.send({ t: "pshot", x, y, vx, vy, dmg, color, homing });
+        this.net.send({ t: "pshot", x, y, vx, vy, dmg, color, homing, r });
       }
     };
     const y0 = s.y - 18;
-    if (lvl === 1) {
-      mk(s.x, y0, 0, -860, 1, "#9ffbff"); // tăng tốc độ đạn
-    } else if (lvl === 2) {
-      mk(s.x - 9, y0, 0, -860, 1, "#9ffbff"); // tăng khoảng cách giữa 2 viên
-      mk(s.x + 9, y0, 0, -860, 1, "#9ffbff");
-    } else if (lvl === 3) {
-      mk(s.x, y0, 0, -880, 1.2, "#ffd23f"); // tăng damage và tốc độ
-      mk(s.x - 9, y0 + 4, -140, -840, 1, "#ffd23f");
-      mk(s.x + 9, y0 + 4, 140, -840, 1, "#ffd23f");
-    } else {
-      mk(s.x - 8, y0, 0, -880, 1.2, "#ffd23f"); // tăng damage
-      mk(s.x + 8, y0, 0, -880, 1.2, "#ffd23f");
-      mk(s.x - 14, y0 + 5, -160, -820, 1, "#ffd23f");
-      mk(s.x + 14, y0 + 5, 160, -820, 1, "#ffd23f");
-      if (Math.floor(this.now * 12) % 2 === 0) mk(s.x, y0 + 6, 0, -540, 2.5, "#7dff5e", true); // tăng damage đạn homing
+
+    // Every collected weapon remains active. Their fire patterns stack together.
+    for (const weapon of weapons) {
+      switch (weapon) {
+        case "pulse":
+          mk(s.x, y0, 0, -900, 1, "#9ffbff");
+          break;
+        case "spread":
+          mk(s.x - 10, y0, -120, -850, 0.8, "#ffd23f");
+          mk(s.x, y0 - 2, 0, -900, 0.9, "#ffd23f");
+          mk(s.x + 10, y0, 120, -850, 0.8, "#ffd23f");
+          break;
+        case "laser":
+          mk(s.x, y0, 0, -1150, 1.7, "#ff4dff", false, 3);
+          break;
+        case "missile":
+          mk(s.x - 7, y0 + 4, -45, -610, 2.2, "#b45cff", true, 5);
+          mk(s.x + 7, y0 + 4, 45, -610, 2.2, "#b45cff", true, 5);
+          break;
+        case "sidewinder":
+          mk(s.x - 13, y0 + 4, -230, -790, 1.1, "#00ffff");
+          mk(s.x + 13, y0 + 4, 230, -790, 1.1, "#00ffff");
+          break;
+        case "plasma":
+          mk(s.x, y0, 0, -700, 3.5, "#7dff5e", false, 8);
+          break;
+        case "burst":
+          for (let i = -1; i <= 1; i++) mk(s.x + i * 7, y0, i * 55, -980, 1.15, "#ff9d2e");
+          break;
+        case "orbit": {
+          const a = this.now * 5;
+          for (const side of [-1, 1]) {
+            const ang = a + (side < 0 ? Math.PI : 0);
+            mk(s.x + Math.cos(ang) * 18, y0 + Math.sin(ang) * 18, Math.cos(ang) * 180, -760 + Math.sin(ang) * 120, 1.4, "#ff6b35");
+          }
+          break;
+        }
+        case "rail":
+          mk(s.x, y0, 0, -1450, 2.8, "#ffffff", false, 2);
+          break;
+        case "nova":
+          for (let i = 0; i < 5; i++) {
+            const a = -Math.PI / 2 + (i - 2) * 0.28;
+            mk(s.x, y0, Math.cos(a) * 380, Math.sin(a) * 380, 1.3, "#ff2d78");
+          }
+          break;
+      }
     }
-    // lửa đầu nòng
-    this.parts.push({
-      x: s.x, y: y0 - 4, vx: 0, vy: -60, life: 0.07, max: 0.07,
-      size: 6, color: s.color, kind: "puff",
-    });
+    s.cool = Math.max(0.075, 0.16 - weapons.length * 0.004);
+    this.parts.push({ x: s.x, y: y0 - 4, vx: 0, vy: -60, life: 0.07, max: 0.07, size: 6, color: s.color, kind: "puff" });
     if (s === this.me) audio.shoot();
   }
 
@@ -1460,52 +1502,20 @@ export class Engine {
 
   private applyPickup(type: PickType) {
     const me = this.me;
-    if (type === "W") {
-      if (me.weapon < 4) {
-        me.weapon++;
-        this.pop(me.x, me.y - 30, "POWER UP!", "#ffd23f", true);
-      } else {
-        this.score += 500;
-        this.pop(me.x, me.y - 30, "+500", "#ffd23f");
-      }
-    } else if (type === "B") {
-      if (me.bombs < 6) {
-        me.bombs++;
-        this.pop(me.x, me.y - 30, "BOMB +1", "#ff2d78", true);
-      } else {
-        this.score += 300;
-        this.pop(me.x, me.y - 30, "+300", "#ff2d78");
-      }
+    if (type === "B") {
+      if (me.bombs < 6) { me.bombs++; this.pop(me.x, me.y - 30, "BOMB +1", "#ff2d78", true); }
+      else { this.score += 300; this.pop(me.x, me.y - 30, "+300", "#ff2d78"); }
     } else if (type === "H") {
-      if (me.lives < 4) {
-        me.lives++;
-        this.pop(me.x, me.y - 30, "LIFE +1", "#7dff5e", true);
+      if (me.lives < 4) { me.lives++; this.pop(me.x, me.y - 30, "LIFE +1", "#7dff5e", true); }
+      else { this.score += 1000; this.pop(me.x, me.y - 30, "+1000", "#7dff5e"); }
+    } else {
+      if (!me.weapons.includes(type)) {
+        me.weapons.push(type);
+        this.pop(me.x, me.y - 30, `${WEAPON_LABEL[type]} ONLINE`, "#ffd23f", true);
       } else {
-        this.score += 1000;
-        this.pop(me.x, me.y - 30, "+1000", "#7dff5e");
+        this.score += 750;
+        this.pop(me.x, me.y - 30, "+750", "#ffd23f");
       }
-    } else if (type === "S") {
-      // Shield - thêm mạng tạm thời
-      me.lives = Math.min(5, me.lives + 1);
-      this.pop(me.x, me.y - 30, "SHIELD!", "#00f0ff", true);
-    } else if (type === "F") {
-      // Fire Rate - tăng tốc độ bắn
-      me.cool = Math.max(0, me.cool - 0.08);
-      this.pop(me.x, me.y - 30, "FAST FIRE!", "#ff9d2e", true);
-    } else if (type === "M") {
-      // Missile - đạn tên lửa
-      me.weapon = Math.max(me.weapon, 3);
-      this.pop(me.x, me.y - 30, "MISSILE!", "#b45cff", true);
-    } else if (type === "D") {
-      // Double - nhân đôi đạn hiện tại
-      if (me.weapon < 4) {
-        me.weapon += 2;
-        me.weapon = Math.min(4, me.weapon);
-      } else {
-        this.score += 800;
-        this.pop(me.x, me.y - 30, "+800", "#ff2d78");
-      }
-      this.pop(me.x, me.y - 30, "DOUBLE!", "#ff4d8f", true);
     }
     this.ring(me.x, me.y, "#ffffff");
     audio.power();
@@ -1882,35 +1892,19 @@ export class Engine {
     if (e.type === "boss") {
       this.shake = Math.min(32, this.shake + 20);
       this.flashWhite = 0.6;
-      this.dropPickup(e.x - 30, e.y, "W");
-      this.dropPickup(e.x + 30, e.y, "B");
+      this.dropPickup(e.x - 30, e.y, WEAPON_TYPES[Math.floor(Math.random() * WEAPON_TYPES.length)]);
+      this.dropPickup(e.x + 30, e.y, WEAPON_TYPES[Math.floor(Math.random() * WEAPON_TYPES.length)]);
       this.pop(e.x, e.y - 40, "BOSS DOWN!", "#ff2d78", true);
     } else {
-      // Cải thiện hệ thống dropbox: tăng tỷ lệ drop và đa dạng hóa vật phẩm
-      const baseDropRate = 0.28; // tăng từ 0.14 lên 0.28
-      const dropBonus = Math.min(0.12, this.wave * 0.008); // bonus theo wave
-      const dropChance = baseDropRate + dropBonus;
-      
+      // Weapon drops are independent systems: collecting one never replaces another.
+      const dropChance = Math.min(0.52, 0.32 + this.wave * 0.006);
       if (Math.random() < dropChance) {
-        const anyHurt = [...this.players.values()].some((s) => s.lives < 4 || s.weapon < 3);
         const roll = Math.random();
-        // Cải thiện phân bổ vật phẩm: thêm nhiều loại mới S, F, M, D
         let type: PickType;
-        if (roll < 0.35) {
-          type = "W"; // 35% weapon
-        } else if (roll < 0.55) {
-          type = "B"; // 20% bomb
-        } else if (roll < 0.70) {
-          type = "H"; // 15% health
-        } else if (roll < 0.80) {
-          type = "S"; // 10% shield
-        } else if (roll < 0.88) {
-          type = "F"; // 8% fire rate
-        } else if (roll < 0.94) {
-          type = "M"; // 6% missile
-        } else {
-          type = "D"; // 6% double
-        }
+        if (roll < 0.72) {
+          type = WEAPON_TYPES[Math.floor(Math.random() * WEAPON_TYPES.length)];
+        } else if (roll < 0.88) type = "B";
+        else type = "H";
         this.dropPickup(e.x, e.y, type);
       }
     }
@@ -2404,13 +2398,18 @@ export class Engine {
       let col: string;
       let label: string;
       switch (p.type) {
-        case "W": col = "#ffd23f"; label = "W"; break;
+        case "pulse": col = "#9ffbff"; label = "P"; break;
+        case "spread": col = "#ffd23f"; label = "S"; break;
+        case "laser": col = "#ff4dff"; label = "L"; break;
+        case "missile": col = "#b45cff"; label = "M"; break;
+        case "sidewinder": col = "#00ffff"; label = "W"; break;
+        case "plasma": col = "#7dff5e"; label = "P+"; break;
+        case "burst": col = "#ff9d2e"; label = "B"; break;
+        case "orbit": col = "#ff6b35"; label = "O"; break;
+        case "rail": col = "#ffffff"; label = "R"; break;
+        case "nova": col = "#ff2d78"; label = "N"; break;
         case "B": col = "#ff2d78"; label = "B"; break;
         case "H": col = "#7dff5e"; label = "H"; break;
-        case "S": col = "#00f0ff"; label = "S"; break;
-        case "F": col = "#ff9d2e"; label = "F"; break;
-        case "M": col = "#b45cff"; label = "M"; break;
-        case "D": col = "#ff4d8f"; label = "D"; break;
         default: col = "#ffffff"; label = "?";
       }
       c.save();

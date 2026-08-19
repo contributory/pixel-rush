@@ -119,9 +119,6 @@ export class NetClient {
             resolve();
           }
           this.onPeers?.([...this.peers]);
-
-          // Setup WebRTC after connection
-          this.setupWebRTC();
           return;
         }
 
@@ -170,6 +167,15 @@ export class NetClient {
         }
       };
     });
+  }
+
+  // WebRTC is intentionally created only when the host starts a 2-player match.
+  async startWebRTC(): Promise<void> {
+    if (this.peers.length !== 1) {
+      throw new Error("WebRTC requires exactly 2 players in the room");
+    }
+    if (this.pc) return;
+    await this.setupWebRTC();
   }
 
   // --- WebRTC Methods ---

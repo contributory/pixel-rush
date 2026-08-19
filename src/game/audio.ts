@@ -30,10 +30,20 @@ class AudioSys {
 
   init() {
     if (this.bgm || this.bgmStarting || this.synthTimer !== null) return;
+
+    // Chrome blocks media playback until a user gesture. Do not call play()
+    // from the constructor/game bootstrap; prepare the element and wait for
+    // the first real interaction.
     this.startBgm();
-    const wake = () => this.resume();
-    window.addEventListener("pointerdown", wake);
+    const wake = () => {
+      this.resume();
+      window.removeEventListener("pointerdown", wake);
+      window.removeEventListener("keydown", wake);
+      window.removeEventListener("touchstart", wake);
+    };
+    window.addEventListener("pointerdown", wake, { passive: true });
     window.addEventListener("keydown", wake);
+    window.addEventListener("touchstart", wake, { passive: true });
   }
 
   private emit() {
@@ -48,7 +58,7 @@ class AudioSys {
     el.loop = true;
     el.preload = "auto";
     el.volume = this.muted ? 0 : 0.5;
-    let stage = 0; // 0 = file nội bộ, 1 = tải blob từ nguồn
+    let stage = 0;
     let settled = false;
 
     const finish = (src: BgmSource) => {
@@ -58,6 +68,7 @@ class AudioSys {
       this.bgmSource = src;
       el.addEventListener("play", () => this.emit());
       el.addEventListener("pause", () => this.emit());
+      el.addEventListener("ended", () => this.emit());
       this.emit();
     };
 
@@ -68,21 +79,6 @@ class AudioSys {
       this.startSynth();
     };
 
-    const tryPlay = () => {
-      const attempt = stage;
-      el.play()
-        .then(() => finish(attempt === 0 ? "local" : "remote"))
-        .catch((e: unknown) => {
-          const name = e instanceof DOMException ? e.name : "";
-          if (name === "NotAllowedError") {
-            // Trình duyệt chặn autoplay — giữ nguồn, phát khi có tương tác đầu tiên.
-            finish(attempt === 0 ? "local" : "remote");
-          } else if (!settled && attempt === stage) {
-            next();
-          }
-        });
-    };
-
     const next = () => {
       if (settled) return;
       if (stage === 0) {
@@ -90,7 +86,6 @@ class AudioSys {
         el.onerror = fallbackSynth;
         el.src = REMOTE_SRC;
         el.load();
-        tryPlay();
       } else {
         fallbackSynth();
       }
@@ -98,13 +93,28 @@ class AudioSys {
 
     el.onerror = next;
     el.src = LOCAL_SRC;
-    tryPlay();
+    el.load();
+
+    // Treat the source as ready; actual playback is explicitly triggered by
+    // resume(), which is called from a Chrome user-gesture handler.
+    el.addEventListener("canplay", () => {
+      if (!settled) finish(stage === 0 ? "local" : "remote");
+    }, { once: true });
   }
 
   resume() {
-    if (this.ctx && this.ctx.state === "suspended") this.ctx.resume().catch(() => {});
-    if (this.bgm && this.bgmSource !== "synth" && this.bgm.paused) {
-      this.bgm.play().catch(() => {});
+    const ctx = this.ensure();
+    if (ctx?.state === "suspended") ctx.resume().catch(() => {});
+
+    if (this.bgm && this.bgmSource !== "synth" && this.bgm.paused && !this.muted) {
+      this.bgm.play().catch(() => {
+        // If the file cannot be played in this browser, use the WebAudio
+        // fallback. This also avoids Chrome's silent autoplay failure.
+        if (this.bgmSource !== "synth") {
+          this.bgm = null;
+          this.startSynth();
+        }
+      });
     }
     if (this.bgmSource === "synth" && this.synthTimer === null) this.startSynth();
   }

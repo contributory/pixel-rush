@@ -667,12 +667,8 @@ function Hud({ hud, bgmPlaying, onLeave }: { hud: HudData; bgmPlaying: boolean; 
             </div>
             <div className="ml-2 flex flex-col gap-1">
               <div className="flex gap-[3px]">
-                {[1, 2, 3, 4].map((i) => (
-                  <span
-                    key={i}
-                    className="w-2 h-2"
-                    style={{ background: i <= pl.weapon ? "#ffd23f" : "rgba(36,48,107,0.9)" }}
-                  />
+                {pl.weapons.map((w) => (
+                  <span key={w} className="w-2 h-2" title={w.toUpperCase()} style={{ background: "#ffd23f" }} />
                 ))}
               </div>
               <div className="flex gap-[3px] items-center">
