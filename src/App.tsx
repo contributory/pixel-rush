@@ -633,8 +633,15 @@ function LobbyScreen({ net, room, onStart, onLeave }: LobbyProps) {
 
 function Hud({ hud, bgmPlaying, onLeave }: { hud: HudData; bgmPlaying: boolean; onLeave: () => void }) {
   const coop = hud.role !== "solo";
+  const isTouch =
+    typeof window !== "undefined" && !!window.matchMedia?.("(pointer: coarse)").matches;
   return (
     <div className="absolute inset-0 z-20 pointer-events-none select-none">
+      {isTouch && (
+        <div className="absolute bottom-3 inset-x-0 text-center font-display text-[8px] text-dim/80 tracking-wider">
+          DRAG TO MOVE · AUTO-FIRE ON
+        </div>
+      )}
       {/* left: squad */}
       <div className="absolute top-3 left-3 flex flex-col gap-2">
         {hud.players.map((pl) => (

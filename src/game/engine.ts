@@ -150,6 +150,17 @@ export class Engine {
 
   private keys = new Set<string>();
   private pressed = new Set<string>();
+
+  /* --- điều khiển cảm ứng (mobile): joystick ảo --- */
+  private stick = { x: 0, y: 0 };
+  private stickPtr: number | null = null;
+  private stickOx = 0;
+  private stickOy = 0;
+  private stickR = 64;
+  private onPtrDown: (e: PointerEvent) => void;
+  private onPtrMove: (e: PointerEvent) => void;
+  private onPtrUp: (e: PointerEvent) => void;
+
   private raf = 0;
   private last = 0;
   private now = 0;
@@ -220,6 +231,17 @@ export class Engine {
     window.addEventListener("keyup", this.onKeyUp);
     document.addEventListener("visibilitychange", this.onVis);
 
+    // Cảm ứng: chặn scroll/zoom, joystick ảo bám theo ngón tay
+    this.onPtrDown = (e) => this.pointerDown(e);
+    this.onPtrMove = (e) => this.pointerMove(e);
+    this.onPtrUp = (e) => this.pointerUp(e);
+    this.canvas.style.touchAction = "none";
+    this.canvas.style.userSelect = "none";
+    this.canvas.addEventListener("pointerdown", this.onPtrDown);
+    this.canvas.addEventListener("pointermove", this.onPtrMove);
+    this.canvas.addEventListener("pointerup", this.onPtrUp);
+    this.canvas.addEventListener("pointercancel", this.onPtrUp);
+
     this.resize();
     this.buildStars();
     audio.init();
@@ -246,6 +268,10 @@ export class Engine {
     window.removeEventListener("keydown", this.onKeyDown);
     window.removeEventListener("keyup", this.onKeyUp);
     document.removeEventListener("visibilitychange", this.onVis);
+    this.canvas.removeEventListener("pointerdown", this.onPtrDown);
+    this.canvas.removeEventListener("pointermove", this.onPtrMove);
+    this.canvas.removeEventListener("pointerup", this.onPtrUp);
+    this.canvas.removeEventListener("pointercancel", this.onPtrUp);
     this.net?.close();
     this.net = null;
   }
@@ -310,6 +336,41 @@ export class Engine {
         this.restart();
       }
     }
+  }
+
+  /* --- điều khiển cảm ứng: joystick ảo (kéo ngón tay trên màn hình) --- */
+  private pointerDown(e: PointerEvent) {
+    if (this.phase !== "playing") return;
+    if (this.stickPtr !== null) return; // chỉ theo dõi 1 ngón
+    try {
+      this.canvas.setPointerCapture(e.pointerId);
+    } catch { /* ignore */ }
+    this.stickPtr = e.pointerId;
+    this.stickOx = e.clientX;
+    this.stickOy = e.clientY;
+    this.stick.x = 0;
+    this.stick.y = 0;
+    e.preventDefault();
+  }
+
+  private pointerMove(e: PointerEvent) {
+    if (this.stickPtr !== e.pointerId) return;
+    const dx = e.clientX - this.stickOx;
+    const dy = e.clientY - this.stickOy;
+    const len = Math.hypot(dx, dy);
+    const k = len > this.stickR ? this.stickR / len : 1;
+    this.stick.x = (dx * k) / this.stickR;
+    this.stick.y = (dy * k) / this.stickR;
+  }
+
+  private pointerUp(e: PointerEvent) {
+    if (this.stickPtr !== e.pointerId) return;
+    this.stickPtr = null;
+    this.stick.x = 0;
+    this.stick.y = 0;
+    try {
+      this.canvas.releasePointerCapture(e.pointerId);
+    } catch { /* ignore */ }
   }
 
   /* ---------------- public API ---------------- */
@@ -918,16 +979,16 @@ export class Engine {
     const me = this.me;
     if (me.alive) {
       const dx = (this.keys.has("ArrowRight") || this.keys.has("KeyD") ? 1 : 0) -
-        (this.keys.has("ArrowLeft") || this.keys.has("KeyA") ? 1 : 0);
+        (this.keys.has("ArrowLeft") || this.keys.has("KeyA") ? 1 : 0) + this.stick.x;
       const dy = (this.keys.has("ArrowDown") || this.keys.has("KeyS") ? 1 : 0) -
-        (this.keys.has("ArrowUp") || this.keys.has("KeyW") ? 1 : 0);
+        (this.keys.has("ArrowUp") || this.keys.has("KeyW") ? 1 : 0) + this.stick.y;
       const len = Math.hypot(dx, dy) || 1;
       const speed = 370;
       me.vx = (dx / len) * speed;
       const vy = (dy / len) * speed;
       me.x = clamp(me.x + me.vx * dt, 26, this.W - 26);
       me.y = clamp(me.y + vy * dt, this.H * 0.35, this.H - 40);
-      me.firing = this.keys.has("Space") || this.keys.has("KeyJ");
+      me.firing = true; // auto-fire: phi công chỉ cần di chuyển
       me.cool -= dt;
       if (me.firing && me.cool <= 0) this.firePlayer(me);
       if ((this.pressed.has("KeyK") || this.pressed.has("KeyX")) && me.bombs > 0) {
