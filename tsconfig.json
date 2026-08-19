@@ -12,5 +12,5 @@
     "noEmit": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["src", "main.ts"]
+  "include": ["src", "test/main.ts"]
 }
