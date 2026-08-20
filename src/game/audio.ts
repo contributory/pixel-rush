@@ -1,17 +1,15 @@
 /* Audio system: background music + synthesized WebAudio sound effects. */
 
-/** Local BGM from src folder. Falls back to chiptune if missing. */
-const LOCAL_SRC = "/src/Pixel Rush.mp3";
+/** Local BGM from public/ folder. Stays silent if missing. */
+const LOCAL_SRC = "/pixel-rush.mp3";
 
-export type BgmSource = "local" | "synth" | "none";
+export type BgmSource = "local" | "none";
 
 class AudioSys {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
   private bgm: HTMLAudioElement | null = null;
   private bgmStarting = false;
-  private synthTimer: number | null = null;
-  private synthStep = 0;
   private lastShot = 0;
   muted = false;
   bgmSource: BgmSource = "none";
@@ -28,7 +26,7 @@ class AudioSys {
   /* ---------- background music ---------- */
 
   init() {
-    if (this.bgm || this.bgmStarting || this.synthTimer !== null) return;
+    if (this.bgm || this.bgmStarting) return;
 
     // Chrome blocks media playback until a user gesture. Do not call play()
     // from the constructor/game bootstrap; prepare the element and wait for
@@ -46,8 +44,7 @@ class AudioSys {
   }
 
   private emit() {
-    const playing =
-      (this.bgm !== null && !this.bgm.paused) || this.synthTimer !== null;
+    const playing = this.bgm !== null && !this.bgm.paused;
     this.onBgmState?.(playing, this.bgmSource);
   }
 
@@ -71,27 +68,30 @@ class AudioSys {
       this.emit();
       // If a gesture already unlocked audio, start now.
       if (!this.muted) {
-        void el.play().then(() => this.emit()).catch(() => { /* wait for explicit resume */ });
+        void el.play().then(() => this.emit()).catch(() => {
+          /* wait for explicit resume */
+        });
       }
     };
 
-    const fallbackSynth = () => {
+    const onMissing = () => {
       if (settled) return;
       settled = true;
       this.bgmStarting = false;
-      console.warn("[audio] /music/pixel-rush.mp3 missing — using chiptune fallback");
-      this.startSynth();
+      console.warn("[audio] background music missing — playback will stay silent");
+      this.bgmSource = "none";
+      this.emit();
     };
 
-    el.addEventListener("error", fallbackSynth, { once: true });
+    el.addEventListener("error", onMissing, { once: true });
     el.addEventListener("canplay", finish, { once: true });
     el.src = LOCAL_SRC;
     el.load();
   }
 
-  /** True when BGM (file or synth loop) is actively playing. */
+  /** True when BGM is actively playing. */
   get isBgmPlaying(): boolean {
-    return (this.bgm !== null && !this.bgm.paused) || this.synthTimer !== null;
+    return this.bgm !== null && !this.bgm.paused;
   }
 
   resume() {
@@ -107,55 +107,34 @@ class AudioSys {
       return;
     }
 
-    if (this.bgm && this.bgmSource !== "synth") {
+    if (this.bgm) {
       if (this.bgm.paused) {
         void this.bgm.play().then(() => this.emit()).catch(() => {
-          // File blocked or missing — fall back to WebAudio chiptune.
-          if (this.bgmSource !== "synth") {
-            try { this.bgm?.pause(); } catch { /* ignore */ }
+          // File blocked or missing — stay silent.
+          if (this.bgm) {
+            try {
+              this.bgm.pause();
+            } catch {
+              /* ignore */
+            }
             this.bgm = null;
-            this.startSynth();
+            this.bgmSource = "none";
+            this.emit();
           }
         });
       }
-    } else if (this.bgmSource === "synth" || this.bgmSource === "none") {
-      if (this.synthTimer === null) this.startSynth();
-    } else if (!this.bgm && !this.bgmStarting) {
-      // Still loading; kick synth so the user hears something immediately.
-      this.startSynth();
     }
     this.emit();
   }
 
   pauseBgm() {
     if (this.bgm && !this.bgm.paused) {
-      try { this.bgm.pause(); } catch { /* ignore */ }
+      try {
+        this.bgm.pause();
+      } catch {
+        /* ignore */
+      }
     }
-    // Synth keeps its timer but notes are silenced via muted / we stop it for true pause.
-    if (this.synthTimer !== null) {
-      window.clearInterval(this.synthTimer);
-      this.synthTimer = null;
-    }
-    this.emit();
-  }
-
-  /** Fallback BGM: a synthesized chiptune loop if the MP3 file is missing. */
-  private startSynth() {
-    const ctx = this.ensure();
-    if (!ctx || this.synthTimer !== null) return;
-    this.bgmSource = "synth";
-    const bass = [110, 110, 130.8, 110, 164.8, 110, 98, 110, 110, 110, 130.8, 110, 174.6, 164.8, 146.8, 130.8];
-    const arp = [440, 523.3, 659.3, 880, 659.3, 523.3, 440, 329.6];
-    this.synthStep = 0;
-    this.synthTimer = window.setInterval(() => {
-      if (this.muted) return;
-      const i = this.synthStep++;
-      const t = ctx.currentTime;
-      this.note(bass[i % 16], t, 0.13, "square", 0.16);
-      if (i % 2 === 0) this.note(arp[(i / 2) % 8], t + 0.01, 0.09, "triangle", 0.1);
-      if (i % 4 === 2) this.noiseHit(0.05, 0.08, 6000, t);
-      if (i % 16 === 0) this.note(1567.98, t + 0.02, 0.3, "sawtooth", 0.05);
-    }, 138);
     this.emit();
   }
 
@@ -202,7 +181,8 @@ class AudioSys {
     if (!this.ctx) {
       const AC =
         window.AudioContext ||
-        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        (window as unknown as { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext;
       if (!AC) return null;
       this.ctx = new AC();
       this.master = this.ctx.createGain();
@@ -213,7 +193,14 @@ class AudioSys {
     return this.ctx;
   }
 
-  private note(f: number, t: number, d: number, type: OscillatorType, v: number, f2?: number) {
+  private note(
+    f: number,
+    t: number,
+    d: number,
+    type: OscillatorType,
+    v: number,
+    f2?: number,
+  ) {
     const ctx = this.ensure();
     if (!ctx || !this.master || this.muted) return;
     const o = ctx.createOscillator();
@@ -235,7 +222,8 @@ class AudioSys {
     const len = Math.max(1, Math.floor(ctx.sampleRate * d));
     const buf = ctx.createBuffer(1, len, ctx.sampleRate);
     const data = buf.getChannelData(0);
-    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    for (let i = 0; i < len; i++)
+      data[i] = (Math.random() * 2 - 1) * (1 - i / len);
     const src = ctx.createBufferSource();
     src.buffer = buf;
     const flt = ctx.createBiquadFilter();
@@ -303,7 +291,9 @@ class AudioSys {
     const ctx = this.ensure();
     if (!ctx) return;
     const seq = [392, 330, 262, 196];
-    seq.forEach((f, i) => this.note(f, ctx.currentTime + i * 0.22, 0.24, "square", 0.18));
+    seq.forEach((f, i) =>
+      this.note(f, ctx.currentTime + i * 0.22, 0.24, "square", 0.18),
+    );
   }
   ui() {
     const ctx = this.ensure();
