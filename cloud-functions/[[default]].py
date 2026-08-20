@@ -1,7 +1,9 @@
+import asyncio
 import json
+import time
 
-from blob_store import BlobStore
-from sanic import Sanic, Websocket, html
+from rabbit import INSTANCE_ID, RabbitHub
+from sanic import Sanic, Websocket
 from sanic import json as json_response
 
 app = Sanic("PixelRushServer")
@@ -9,44 +11,53 @@ app = Sanic("PixelRushServer")
 # Configuration
 PORT = 8000
 MAX_PLAYERS = 2
-BLOB_STORE_NAME = "pixel-rush-rooms"
+HEARTBEAT_SECONDS = 10
 
-# In-memory Socket Manager (Lưu giữ WebSocket kết nối thực tế trong RAM)
-# Cấu trúc: { "ROOM_CODE": [ {"id": "p1", "ws": WebConnection, "name": "...", "color": "..."}, ... ] }
+# In-memory Socket Manager — only holds the real WebSocket connections of THIS INSTANCE
+# Shape: { "ROOM_CODE": [ {"id": "p1", "ws": WebConnection, "name": "...", "color": "...", "joined_at": ...}, ... ] }
 CONNECTED_ROOMS = {}
-# Trạng thái phòng trong RAM (mirror của blob status) — dùng làm fallback khi Blob lỗi
-ROOM_STATUS = {}
+# Shared room registry — merged from every instance via RabbitMQ.
+# Shape: {
+#   "ROOM_CODE": {
+#       "room", "players": [{"id","name","color","joined_at"}...],
+#       "status", "max", "ts",
+#       "src_ts": { instance_id: ts }   # last timestamp seen from each instance
+#   }
+# }
+ROOM_REGISTRY = {}
 seq = 0
+
+# RabbitMQ hub — shares state & routes messages between instances
+hub = RabbitHub()
 
 
 # --- Helper Functions ---
-def get_room_key(room_code: str) -> str:
-    return f"rooms/{room_code}.json"
+def room_players(room_code: str) -> list:
+    """Players of a room (local + remote) from the registry."""
+    return ROOM_REGISTRY.get(room_code, {}).get("players", [])
 
 
-def get_status_key(room_code: str) -> str:
-    return f"status/{room_code}.json"
+def sort_players(players: list) -> list:
+    """Sort by join order — ensures every instance picks the same host."""
+    return sorted(players, key=lambda p: (p.get("joined_at", 0), p.get("id", "")))
 
 
-def rooms_from_ram() -> list:
-    """Liệt kê phòng từ RAM — fallback khi Blob Storage không khả dụng."""
+def rooms_from_registry() -> list:
+    """List rooms from the shared registry (all instances)."""
     return [
         {
             "room": code,
-            "players": len(clients),
-            "max": MAX_PLAYERS,
-            "status": ROOM_STATUS.get(code, "lobby"),
-            "pilots": [
-                {"id": c["id"], "name": c["name"], "color": c["color"]}
-                for c in clients
-            ],
+            "players": len(info["players"]),
+            "max": info["max"],
+            "status": info["status"],
+            "pilots": info["players"],
         }
-        for code, clients in CONNECTED_ROOMS.items()
+        for code, info in ROOM_REGISTRY.items()
     ]
 
 
 async def broadcast(room_code: str, message_dict: dict, except_id: str | None = None):
-    """Gửi tin nhắn cho tất cả các client trong phòng ngoại trừ except_id"""
+    """Send a message to the LOCAL clients in a room (except except_id)."""
     clients = CONNECTED_ROOMS.get(room_code, [])
     payload = json.dumps(message_dict)
 
@@ -58,16 +69,119 @@ async def broadcast(room_code: str, message_dict: dict, except_id: str | None = 
                 print(f"[WS Broadcast Error] {client['id']}: {e}")
 
 
-async def sync_room_to_blob(room_code: str):
-    """Đồng bộ danh sách Player (không chứa object WebSocket) lên Blob Storage"""
-    store = BlobStore(BLOB_STORE_NAME)
-    clients = CONNECTED_ROOMS.get(room_code, [])
+async def relay(room_code: str, message_dict: dict, except_id: str | None = None):
+    """Broadcast locally + publish to RabbitMQ so other instances receive it.
 
-    players_data = [
-        {"id": c["id"], "name": c["name"], "color": c["color"]} for c in clients
+    Messages this instance published itself are ignored by its own consumer
+    (via src), so there is no duplication with the local broadcast.
+    """
+    await broadcast(room_code, message_dict, except_id)
+    try:
+        await hub.publish_room_msg(room_code, message_dict)
+    except Exception as e:
+        print(f"[Relay] publish {room_code} failed: {e}")
+
+
+async def publish_room_state(room_code: str, deleted: bool = False):
+    """Update the local registry + publish a room-state snapshot to RabbitMQ.
+
+    The snapshot contains this instance's LOCAL players + the REMOTE players
+    known from the registry — every instance publishes a full snapshot, so the
+    registry converges correctly.
+    """
+    current = ROOM_REGISTRY.get(room_code, {})
+    local_ids = {c["id"] for c in CONNECTED_ROOMS.get(room_code, [])}
+    merged = [p for p in current.get("players", []) if p["id"] not in local_ids]
+    merged.extend(
+        {
+            "id": c["id"],
+            "name": c["name"],
+            "color": c["color"],
+            "joined_at": c.get("joined_at", 0),
+        }
+        for c in CONNECTED_ROOMS.get(room_code, [])
+    )
+    merged = sort_players(merged)
+
+    ts = time.time()
+    state = {
+        "room": room_code,
+        "players": merged,
+        "status": current.get("status", "lobby"),
+        "max": MAX_PLAYERS,
+        "deleted": deleted,
+        "ts": ts,
+    }
+    if deleted:
+        ROOM_REGISTRY.pop(room_code, None)
+    else:
+        src_ts = dict(current.get("src_ts", {}))
+        src_ts[INSTANCE_ID] = ts
+        ROOM_REGISTRY[room_code] = {**state, "src_ts": src_ts}
+    try:
+        await hub.publish_room_state(room_code, state)
+    except Exception as e:
+        print(f"[State] publish {room_code} failed: {e}")
+
+
+async def handle_room_state(room_code: str, payload: dict):
+    """Update the registry from another instance's state event."""
+    if payload.get("deleted"):
+        ROOM_REGISTRY.pop(room_code, None)
+        return
+
+    src = str(payload.get("src", ""))
+    event_ts = payload.get("ts", 0)
+    current = ROOM_REGISTRY.get(room_code, {})
+    # Ignore older snapshots from the same instance — avoids resurrecting departed players
+    if event_ts < current.get("src_ts", {}).get(src, 0):
+        return
+
+    local_ids = {c["id"] for c in CONNECTED_ROOMS.get(room_code, [])}
+    remote = [p for p in payload.get("players", []) if p["id"] not in local_ids]
+    local = [
+        {
+            "id": c["id"],
+            "name": c["name"],
+            "color": c["color"],
+            "joined_at": c.get("joined_at", 0),
+        }
+        for c in CONNECTED_ROOMS.get(room_code, [])
     ]
 
-    await store.set_json(get_room_key(room_code), {"players": players_data})
+    src_ts = dict(current.get("src_ts", {}))
+    src_ts[src] = event_ts
+    ROOM_REGISTRY[room_code] = {
+        "room": room_code,
+        "players": sort_players(remote + local),
+        "status": payload.get("status", "lobby"),
+        "max": payload.get("max", MAX_PLAYERS),
+        "ts": event_ts,
+        "src_ts": src_ts,
+    }
+
+
+async def handle_room_msg(room_code: str, message: dict):
+    """Broadcast a message from another instance to the local clients in a room."""
+    await broadcast(room_code, message)
+
+
+async def handle_sync_request():
+    """Another instance just connected — republish all local rooms so it can bootstrap."""
+    for room_code in list(CONNECTED_ROOMS.keys()):
+        await publish_room_state(room_code)
+
+
+async def heartbeat_loop():
+    """Periodically publish local room state — helps new instances bootstrap
+    the registry and discover rooms that are still alive."""
+    while True:
+        await asyncio.sleep(HEARTBEAT_SECONDS)
+        for room_code in list(CONNECTED_ROOMS.keys()):
+            try:
+                await publish_room_state(room_code)
+            except Exception as e:
+                print(f"[Heartbeat] publish {room_code} failed: {e}")
 
 
 # --- HTTP Routes ---
@@ -75,71 +189,25 @@ async def sync_room_to_blob(room_code: str):
 
 @app.get("/rooms")
 async def get_rooms(request):
-    """API Danh sách phòng chơi — ưu tiên RAM (live sockets), blob chỉ là phụ"""
-    # Live connections are the source of truth. Blob lags and can show ghost rooms.
-    live = rooms_from_ram()
-    if live:
-        return json_response({"maxPlayers": MAX_PLAYERS, "rooms": live})
-    try:
-        store = BlobStore(BLOB_STORE_NAME)
-        blobs = await store.list(prefix="rooms/")
-
-        room_list = []
-        for blob in blobs.get("blobs", []):
-            room_code = blob["key"].replace("rooms/", "").replace(".json", "")
-            try:
-                room_data = await store.get(blob["key"], type="json")
-                if room_data and isinstance(room_data.get("players"), list):
-                    status_data = (
-                        await store.get(get_status_key(room_code), type="json") or {}
-                    )
-                    room_list.append(
-                        {
-                            "room": room_code,
-                            "players": len(room_data["players"]),
-                            "max": MAX_PLAYERS,
-                            "status": status_data.get("status", "lobby"),
-                            "pilots": room_data["players"],
-                        }
-                    )
-            except Exception as e:
-                print(f"Error reading room {room_code}: {e}")
-
-        return json_response({"maxPlayers": MAX_PLAYERS, "rooms": room_list})
-    except Exception as e:
-        # Blob không khả dụng → vẫn trả về các phòng đang mở trong RAM
-        print(f"[Rooms] Blob unavailable, using RAM fallback: {e}")
-        return json_response({"maxPlayers": MAX_PLAYERS, "rooms": rooms_from_ram()})
+    """API: list of open rooms — from the shared registry (all instances)."""
+    return json_response({"maxPlayers": MAX_PLAYERS, "rooms": rooms_from_registry()})
 
 
 @app.get("/status")
 async def get_status(request):
-    """API Debug thông tin server"""
-    try:
-        store = BlobStore(BLOB_STORE_NAME)
-        blobs = await store.list(prefix="rooms/")
-
-        open_rooms = []
-        for blob in blobs.get("blobs", []):
-            room_code = blob["key"].replace("rooms/", "").replace(".json", "")
-            try:
-                room_data = await store.get(blob["key"], type="json")
-                if room_data and "players" in room_data:
-                    open_rooms.append(
-                        {"room": room_code, "players": room_data["players"]}
-                    )
-            except Exception as e:
-                pass
-
-        return json_response(
-            {
-                "name": "PIXEL RUSH Python relay server",
-                "maxPlayers": MAX_PLAYERS,
-                "open": open_rooms,
-            }
-        )
-    except Exception as e:
-        return json_response({"error": "Failed to fetch status"}, status=500)
+    """API: server debug info."""
+    return json_response(
+        {
+            "name": "PIXEL RUSH Python relay server",
+            "instance": INSTANCE_ID,
+            "rabbitmq": hub.connected,
+            "maxPlayers": MAX_PLAYERS,
+            "open": [
+                {"room": code, "players": info["players"]}
+                for code, info in ROOM_REGISTRY.items()
+            ],
+        }
+    )
 
 
 # --- WebSocket Route ---
@@ -151,44 +219,44 @@ async def ws_relay(request, ws: Websocket):
 
     room_code = request.args.get("room", "DEFAULT").strip().upper()
     seq += 1
-    player_id = f"p{seq}"
+    player_id = f"{INSTANCE_ID}-p{seq}"
 
-    store = BlobStore(BLOB_STORE_NAME)
-
-    # Khởi tạo phòng trong RAM nếu chưa có
-    if room_code not in CONNECTED_ROOMS:
-        CONNECTED_ROOMS[room_code] = []
-
-    clients = CONNECTED_ROOMS[room_code]
-
-    # Kiểm tra phòng đầy
-    if len(clients) >= MAX_PLAYERS:
+    # Reject if the room is full based on the shared registry (local + remote)
+    if len(room_players(room_code)) >= MAX_PLAYERS:
         await ws.send(json.dumps({"t": "error", "msg": "Room is full"}))
         await ws.close(code=4001, reason="room full")
         return
 
-    # Tạo client object
-    client_info = {"id": player_id, "ws": ws, "name": "Pilot", "color": "#888"}
+    # Create the local room if missing + bind the queue to receive messages from other instances
+    if room_code not in CONNECTED_ROOMS:
+        CONNECTED_ROOMS[room_code] = []
+        try:
+            await hub.bind_room(room_code)
+        except Exception as e:
+            print(f"[WS] bind room {room_code} failed: {e}")
 
-    you_host = len(clients) == 0
+    clients = CONNECTED_ROOMS[room_code]
+
+    # The first player (across the whole system) is the HOST
+    you_host = len(room_players(room_code)) == 0
+
+    client_info = {
+        "id": player_id,
+        "ws": ws,
+        "name": "Pilot",
+        "color": "#888",
+        "joined_at": time.time(),
+    }
     clients.append(client_info)
-    ROOM_STATUS.setdefault(room_code, "lobby")
 
-    # Đồng bộ lên Blob — KHÔNG được chặn việc tạo phòng nếu Blob lỗi
-    status_key = get_status_key(room_code)
-    try:
-        await sync_room_to_blob(room_code)
-        status_data = await store.get(status_key, type="json")
-        if not status_data:
-            await store.set_json(status_key, {"status": "lobby"})
-    except Exception as e:
-        print(f"[WS] Blob sync skipped for {room_code}: {e}")
+    # Update the local registry + publish so other instances know
+    await publish_room_state(room_code)
 
-    # Gửi tin nhắn Welcome
+    # Welcome — peers come from the registry (includes players on other instances)
     existing_peers = [
-        {"id": c["id"], "name": c["name"], "color": c["color"]}
-        for c in clients
-        if c["id"] != player_id
+        {"id": p["id"], "name": p["name"], "color": p["color"]}
+        for p in room_players(room_code)
+        if p["id"] != player_id
     ]
 
     await ws.send(
@@ -205,25 +273,20 @@ async def ws_relay(request, ws: Websocket):
     )
 
     try:
-        # Vòng lặp nhận dữ liệu qua WebSocket
+        # Loop receiving data over the WebSocket
         async for msg_str in ws:
             try:
                 m = json.loads(msg_str)
             except ValueError:
-                continue  # Bỏ qua gói tin không phải JSON
+                continue  # skip non-JSON frames
 
             t = str(m.get("t", ""))
 
             if t == "join":
                 client_info["name"] = str(m.get("name", client_info["name"]))
                 client_info["color"] = str(m.get("color", client_info["color"]))
-
-                try:
-                    await sync_room_to_blob(room_code)
-                except Exception as e:
-                    print(f"[WS] join blob sync failed: {e}")
-
-                await broadcast(
+                await publish_room_state(room_code)
+                await relay(
                     room_code,
                     {
                         "t": "peer-join",
@@ -241,45 +304,90 @@ async def ws_relay(request, ws: Websocket):
                 break
 
             elif t == "start":
-                ROOM_STATUS[room_code] = "battle"
-                try:
-                    await store.set_json(status_key, {"status": "battle"})
-                except Exception as e:
-                    print(f"[WS] status sync failed: {e}")
+                ROOM_REGISTRY.setdefault(
+                    room_code,
+                    {
+                        "room": room_code,
+                        "players": [],
+                        "status": "lobby",
+                        "max": MAX_PLAYERS,
+                        "ts": 0,
+                        "src_ts": {},
+                    },
+                )["status"] = "battle"
+                await publish_room_state(room_code)
             elif t == "lobby":
-                ROOM_STATUS[room_code] = "lobby"
-                try:
-                    await store.set_json(status_key, {"status": "lobby"})
-                except Exception as e:
-                    print(f"[WS] status sync failed: {e}")
+                ROOM_REGISTRY.setdefault(
+                    room_code,
+                    {
+                        "room": room_code,
+                        "players": [],
+                        "status": "lobby",
+                        "max": MAX_PLAYERS,
+                        "ts": 0,
+                        "src_ts": {},
+                    },
+                )["status"] = "lobby"
+                await publish_room_state(room_code)
 
-            # Relay WebRTC Signaling & Game State sang các peer khác
+            # Relay WebRTC signaling & game state to the other peers
             m["from"] = player_id
-            await broadcast(room_code, m, except_id=player_id)
+            await relay(room_code, m, except_id=player_id)
 
     except Exception as e:
         print(f"[WS Exception] {player_id}: {e}")
     finally:
-        # Xử lý khi ngắt kết nối (Disconnect)
+        # Handle disconnect
         if room_code in CONNECTED_ROOMS:
             CONNECTED_ROOMS[room_code] = [
                 c for c in CONNECTED_ROOMS[room_code] if c["id"] != player_id
             ]
-            remaining_clients = CONNECTED_ROOMS[room_code]
 
-            await broadcast(room_code, {"t": "peer-leave", "id": player_id})
+            # Remove the departed player from the registry
+            remaining = [p for p in room_players(room_code) if p["id"] != player_id]
 
-            try:
-                if len(remaining_clients) == 0:
-                    del CONNECTED_ROOMS[room_code]
-                    ROOM_STATUS.pop(room_code, None)
-                    await store.delete(get_room_key(room_code))
-                    await store.delete(status_key)
-                else:
-                    await sync_room_to_blob(room_code)
-                    # Chuyển Host cho người chơi còn lại
-                    await broadcast(
-                        room_code, {"t": "host", "id": remaining_clients[0]["id"]}
-                    )
-            except Exception as e:
-                print(f"[WS] cleanup (blob) error for {room_code}: {e}")
+            await relay(room_code, {"t": "peer-leave", "id": player_id})
+
+            if len(remaining) == 0:
+                # Room is empty — remove from registry, publish deleted, unbind the queue
+                del CONNECTED_ROOMS[room_code]
+                await publish_room_state(room_code, deleted=True)
+                try:
+                    await hub.unbind_room(room_code)
+                except Exception as e:
+                    print(f"[WS] unbind room {room_code} failed: {e}")
+            else:
+                # Update the registry with the remaining players + publish
+                current = ROOM_REGISTRY.get(room_code, {})
+                src_ts = dict(current.get("src_ts", {}))
+                src_ts[INSTANCE_ID] = time.time()
+                ROOM_REGISTRY[room_code] = {
+                    "room": room_code,
+                    "players": sort_players(remaining),
+                    "status": current.get("status", "lobby"),
+                    "max": MAX_PLAYERS,
+                    "ts": time.time(),
+                    "src_ts": src_ts,
+                }
+                await publish_room_state(room_code)
+                # Transfer Host to the first remaining player (each client checks its own id)
+                await relay(room_code, {"t": "host", "id": remaining[0]["id"]})
+
+
+# --- Startup ---
+
+
+@app.before_server_start
+async def setup(app, loop):
+    try:
+        await hub.connect()
+        print(f"[RabbitMQ] Connected as instance {INSTANCE_ID}")
+        # Ask other instances to republish their state to bootstrap the registry
+        await hub.request_sync()
+    except Exception as e:
+        print(f"[RabbitMQ] Connection failed — running single-instance mode: {e}")
+    loop.create_task(heartbeat_loop())
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=PORT, debug=True)

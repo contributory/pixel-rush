@@ -1,4 +1,4 @@
-/* Hệ thống âm thanh: nhạc nền + hiệu ứng tổng hợp WebAudio. */
+/* Audio system: background music + synthesized WebAudio sound effects. */
 
 /** Optional local BGM (public/music/pixel-rush.mp3). Falls back to chiptune if missing. */
 const LOCAL_SRC = "/music/pixel-rush.mp3";
@@ -25,7 +25,7 @@ class AudioSys {
     }
   }
 
-  /* ---------- nhạc nền ---------- */
+  /* ---------- background music ---------- */
 
   init() {
     if (this.bgm || this.bgmStarting || this.synthTimer !== null) return;
@@ -139,7 +139,7 @@ class AudioSys {
     this.emit();
   }
 
-  /** Nhạc nền dự phòng: vòng chiptune tổng hợp nếu không có file MP3. */
+  /** Fallback BGM: a synthesized chiptune loop if the MP3 file is missing. */
   private startSynth() {
     const ctx = this.ensure();
     if (!ctx || this.synthTimer !== null) return;
@@ -196,7 +196,7 @@ class AudioSys {
     this.setMuted(true);
   }
 
-  /* ---------- hiệu ứng ---------- */
+  /* ---------- sound effects ---------- */
 
   private ensure(): AudioContext | null {
     if (!this.ctx) {

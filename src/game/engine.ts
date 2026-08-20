@@ -1,8 +1,8 @@
 /* ============================================================
    PIXEL RUSH — engine
-   Shoot'em up cuộn dọc, canvas 2D.
-   Solo: tự mô phỏng. Co-op: HOST mô phỏng địch + gửi snapshot,
-   khách gửi input/bullets và nội suy địch từ snapshot.
+   Vertical-scrolling shoot'em up, canvas 2D.
+   Solo: simulated locally. Co-op: HOST simulates enemies + sends snapshots,
+   guest sends input/bullets and interpolates enemies from snapshots.
    ============================================================ */
 
 import { audio } from "./audio";
@@ -60,7 +60,7 @@ export interface EngineCallbacks {
   onNet: (info: NetInfo) => void;
 }
 
-/* ---------------- tiện ích ---------------- */
+/* ---------------- utilities ---------------- */
 const TAU = Math.PI * 2;
 const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
@@ -156,7 +156,7 @@ interface Enemy {
   t: number; flash: number; shootT: number;
   baseX: number; anchorY: number; phase: number;
   dashVx: number; dashVy: number; burst: number;
-  // nội suy phía khách
+  // guest-side interpolation
   tx: number; ty: number; thp: number;
   dead?: boolean;
 }
@@ -272,7 +272,7 @@ export class Engine {
   private keys = new Set<string>();
   private pressed = new Set<string>();
 
-  /* --- điều khiển: PC (mouse + keyboard), Mobile (chạm trực tiếp) --- */
+  /* --- controls: PC (mouse + keyboard), Mobile (direct touch) --- */
   private mouseX = 0;
   private mouseY = 0;
   private mouseActive = false;
@@ -354,7 +354,7 @@ export class Engine {
     window.addEventListener("keyup", this.onKeyUp);
     document.addEventListener("visibilitychange", this.onVis);
 
-    // PC: mouse follow + Ctrl để hiện chuột
+    // PC: mouse follow + Ctrl to show the cursor
     this.canvas.addEventListener("mousemove", (e) => {
       const rect = this.canvas.getBoundingClientRect();
       this.mouseX = e.clientX - rect.left;
@@ -374,7 +374,7 @@ export class Engine {
       this.me.firing = false;
     });
 
-    // Mobile: chạm trực tiếp để di chuyển (direct touch follow)
+    // Mobile: direct touch to move (direct touch follow)
     this.onPtrDown = (e) => this.pointerDown(e);
     this.onPtrMove = (e) => this.pointerMove(e);
     this.onPtrUp = (e) => this.pointerUp(e);
@@ -471,7 +471,7 @@ export class Engine {
       if (e.code === "KeyM") {
         this.toggleMute();
       }
-      // Ctrl để hiện chuột
+      // Ctrl to show the cursor
       if (e.code === "ControlLeft" || e.code === "ControlRight") {
         this.showCursor = true;
         this.canvas.style.cursor = "default";
@@ -494,7 +494,7 @@ export class Engine {
     }
   }
 
-  /* --- điều khiển cảm ứng: chạm trực tiếp (direct touch follow) --- */
+  /* --- touch controls: direct touch (direct touch follow) --- */
   private pointerDown(e: PointerEvent) {
     if (this.phase !== "playing") return;
     try {
@@ -504,7 +504,7 @@ export class Engine {
     this.touchX = e.clientX - rect.left;
     this.touchY = e.clientY - rect.top;
     this.controlMode = "touch";
-    // Auto-fire khi chạm
+    // Auto-fire on touch
     this.me.firing = true;
     e.preventDefault();
   }
@@ -598,7 +598,7 @@ export class Engine {
 
   restart() {
     if (this.phase !== "gameover") return;
-    if (this.role === "guest" && this.net?.open) return; // khách đợi host
+    if (this.role === "guest" && this.net?.open) return; // guest waits for host
     if (this.role === "host" && this.net?.open) {
       this.net.send({ t: "start" });
       this.startMatch();
@@ -674,7 +674,7 @@ export class Engine {
     }
   }
 
-  /** Host bấm bắt đầu trận co-op (hoặc chơi solo nếu chưa nối mạng). */
+  /** Host presses start for the co-op match (or play solo if not networked). */
   async hostStart() {
     if (this.role === "host" && this.net?.open) {
       // Co-op uses WebRTC only after the second player is present and the host
@@ -882,7 +882,7 @@ export class Engine {
 
   private spawnEnemy(type: EnemyType, x: number, phase: number) {
     const w = this.wave;
-    // Độ khó tăng dần: dễ hơn ở đầu, scale mạnh hơn từ wave 10+
+    // Difficulty ramps up gradually: easier early, steeper scaling from wave 10+
     // Harder curve: ramps earlier and keeps climbing
     const difficultyMultiplier =
       w <= 2 ? 0.85 :
@@ -938,7 +938,7 @@ export class Engine {
   }
 
   private handleDisconnect() {
-    // Mất kết nối giữa trận
+    // Lost connection mid-match
     const wasGuest = this.role === "guest";
     if (this.phase === "connecting") {
       this.role = "solo";
@@ -947,7 +947,7 @@ export class Engine {
       return;
     }
     this.net = null;
-    // xóa phi công máy khách khác
+    // remove other clients' pilots
     for (const [id, s] of this.players) {
       if (s !== this.me) {
         this.explode(s.x, s.y, s.color, 1);
@@ -1027,7 +1027,7 @@ export class Engine {
         });
         break;
       case "pshot":
-        // đạn của người chơi khác (chỉ nhận của đồng đội — của mình thì tự mô phỏng)
+        // other players' bullets (only accept allies' — your own are simulated locally)
         this.bullets.push({
           x: Number(m.x), y: Number(m.y), vx: Number(m.vx), vy: Number(m.vy),
           dmg: Number(m.dmg ?? 1), r: 4, from: "p", color: String(m.color ?? "#9ffbff"),
@@ -1115,7 +1115,7 @@ export class Engine {
     } else {
       this.wave = snapWave;
     }
-    // địch: nội suy
+    // enemies: interpolate
     const seen = new Set<number>();
     for (const e of (m.enemies as Array<Record<string, number>>) ?? []) {
       const id = Number(e.i);
@@ -1135,7 +1135,7 @@ export class Engine {
     }
     for (const en of this.enemies) {
       if (!seen.has(en.id)) {
-        // chỉ nổ khi địch còn trong màn hình (tránh nổ "ma" khi địch bay ra ngoài)
+        // only explode while enemy is on-screen (avoids phantom explosions when it flies off)
         if (en.ty < this.H - 10 && en.ty > -20 && en.tx > -30 && en.tx < this.W + 30) {
           this.explode(en.x, en.y, ENEMY_COLORS[en.type] ?? "#ff4d8f", isBossKind(en.type) ? 3 : isMinibossKind(en.type) ? 2 : 1);
         }
@@ -1173,11 +1173,11 @@ export class Engine {
       })),
       picks: this.picks.map((p) => ({ i: p.id, tp: p.type, x: Math.round(p.x), y: Math.round(p.y) })),
     };
-    // Gửi qua WebRTC data channel nếu có (ưu tiên)
+    // Send via WebRTC data channel if available (preferred)
     if (this.net?.open) {
       this.net.broadcastState(state);
     } else if (this.role === "host" && this.net?.open) {
-      // Fallback: gửi qua WebSocket nếu WebRTC data channel không khả dụng
+      // Fallback: send via WebSocket if WebRTC data channel unavailable
       this.net.send(state);
     }
   }
@@ -1196,7 +1196,7 @@ export class Engine {
   /* ---------------- update ---------------- */
 
   private update(dt: number) {
-    // sao luôn trôi (kể cả menu)
+    // stars always drift (even in menu)
     const starSpeed = this.phase === "playing" ? 1 : 0.45;
     for (const s of this.stars) {
       s.y += (26 + s.z * 55) * starSpeed * dt;
@@ -1220,7 +1220,7 @@ export class Engine {
       this.updateFx(dt);
     }
 
-    // hiệu ứng chung
+    // shared effects
     this.shake = Math.max(0, this.shake - dt * 34);
     this.flashRed = Math.max(0, this.flashRed - dt * 1.6);
     this.flashWhite = Math.max(0, this.flashWhite - dt * 2.4);
@@ -1259,7 +1259,7 @@ export class Engine {
     const isSim = this.role !== "guest";
     this.waveT += dt;
 
-    /* --- phi công địa phương --- */
+    /* --- local pilot --- */
     const me = this.me;
     if (me.alive) {
       let tx = me.x;
@@ -1291,16 +1291,16 @@ export class Engine {
         }
       }
 
-      // Di chuyển đến vị trí mục tiêu (lerp cho mượt)
+      // Move toward target position (lerp for smoothness)
       const lerpFactor = this.controlMode === "touch" || this.controlMode === "mouse" ? 0.25 : 1;
       me.x = me.x + (tx - me.x) * lerpFactor;
       me.y = me.y + (ty - me.y) * lerpFactor;
 
-      // Clamp trong màn hình
+      // Clamp within screen bounds
       me.x = clamp(me.x, 26, this.W - 26);
       me.y = clamp(me.y, this.H * 0.35, this.H - 40);
 
-      me.firing = true; // auto-fire: phi công chỉ cần di chuyển
+      me.firing = true; // auto-fire: pilot just needs to move
       me.cool -= dt;
       if (me.firing && me.cool <= 0) this.firePlayer(me);
       if ((this.pressed.has("KeyK") || this.pressed.has("KeyX")) && me.bombs > 0) {
@@ -1319,7 +1319,7 @@ export class Engine {
     }
     me.inv = Math.max(0, me.inv - dt);
 
-    /* --- phi công từ xa (nội suy) --- */
+    /* --- remote pilots (interpolated) --- */
     for (const s of this.players.values()) {
       if (s === me) continue;
       const k = Math.min(1, dt * 18);
@@ -1328,7 +1328,7 @@ export class Engine {
       s.inv = Math.max(0, s.inv - dt);
     }
 
-    /* --- mô phỏng địch (host/solo) --- */
+    /* --- enemy simulation (host/solo) --- */
     if (isSim) {
       for (const sp of this.spawnQueue) {
         if (this.waveT >= sp.at) {
@@ -1338,7 +1338,7 @@ export class Engine {
       }
       this.spawnQueue = this.spawnQueue.filter((s) => s.at !== Infinity);
 
-      // boss wave: rỉ rả thêm drone
+      // boss wave: trickle in extra drones
       if (this.wave % 5 === 0 && this.enemies.some((e) => isBossKind(e.type) || isMinibossKind(e.type))) {
         this.bossTrickleT -= dt;
         if (this.bossTrickleT <= 0 && this.enemies.length < 10) {
@@ -1351,20 +1351,20 @@ export class Engine {
       for (const e of this.enemies) this.updateEnemy(e, dt);
       this.enemies = this.enemies.filter((e) => !e.dead && e.y < this.H + 70 && e.y > -160);
 
-      // Hết wave là vào wave tiếp theo ngay lập tức — không có thời gian nghỉ.
+      // Finishing a wave jumps straight to the next wave — no rest period.
       if (this.spawnQueue.length === 0 && this.enemies.length === 0) {
         this.showBanner("WAVE CLEAR", `+${200 * this.wave} bonus pts`, "#7dff5e");
         this.score += 200 * this.wave;
         audio.power();
         this.nextWave();
-        this.persistProfile(); // checkpoint: lưu wave sắp chơi + vũ khí
+        this.persistProfile(); // checkpoint: save upcoming wave + weapons
       }
 
-      // pickups rơi
+      // falling pickups
       for (const p of this.picks) {
         p.t += dt;
         p.y += 85 * dt;
-        // nam châm
+        // magnet
         let best: ShipState | null = null;
         let bd = 110;
         for (const s of this.players.values()) {
@@ -1386,7 +1386,7 @@ export class Engine {
         if (this.net?.open) this.sendSnap();
       }
     } else {
-      // khách: nội suy địch + pickup
+      // guest: interpolate enemies + pickups
       const k = Math.min(1, dt * 14);
       for (const e of this.enemies) {
         e.x += (e.tx - e.x) * k;
@@ -1402,7 +1402,7 @@ export class Engine {
       }
     }
 
-    /* --- đạn --- */
+    /* --- bullets --- */
     for (const b of this.bullets) {
       if (b.homing) {
         let best: Enemy | null = null;
@@ -1428,8 +1428,8 @@ export class Engine {
       if (b.y < -50 || b.y > this.H + 50 || b.x < -60 || b.x > this.W + 60) b.dead = true;
     }
 
-    /* --- va chạm --- */
-    // đạn của ta vs địch
+    /* --- collisions --- */
+    // our bullets vs enemies
     for (const b of this.bullets) {
       if (b.dead || b.from !== "p") continue;
       for (const e of this.enemies) {
@@ -1450,7 +1450,7 @@ export class Engine {
         }
       }
     }
-    // đạn địch vs phi công (mỗi máy tự lo cho mình)
+    // enemy bullets vs pilots (each machine handles its own)
     if (me.alive && me.inv <= 0) {
       for (const b of this.bullets) {
         if (b.dead || b.from !== "e") continue;
@@ -1464,7 +1464,7 @@ export class Engine {
         }
       }
     }
-    // địch đâm va
+    // enemy ramming
     if (me.alive && me.inv <= 0) {
       for (const e of this.enemies) {
         if (e.dead) continue;
@@ -1481,7 +1481,7 @@ export class Engine {
         }
       }
     }
-    // nhặt đồ
+    // item pickup
     if (me.alive) {
       for (const p of this.picks) {
         if (p.dead) continue;
@@ -1498,19 +1498,19 @@ export class Engine {
 
     this.bullets = this.bullets.filter((b) => !b.dead);
 
-    /* --- combo / thời gian --- */
+    /* --- combo / timing --- */
     if (this.comboT > 0) {
       this.comboT -= dt;
       if (this.comboT <= 0) this.combo = 0;
     }
     this.mult = 1 + Math.min(3, Math.floor(this.combo / 4) * 0.5);
 
-    /* --- gửi trạng thái phi công --- */
+    /* --- send pilot state --- */
     this.shipT += dt;
     if (this.shipT >= 0.05) {
       this.shipT = 0;
       if (this.net?.open) {
-        // Gửi ship state qua WebSocket (signaling không cần low-latency)
+        // Send ship state over WebSocket (signaling doesn't need low latency)
         this.sendShip();
       }
     }
@@ -1566,7 +1566,7 @@ export class Engine {
     audio.over();
   }
 
-  /* ---------------- hành động ---------------- */
+/* ---------------- actions ---------------- */
 
   private firePlayer(s: ShipState) {
     const weapons = s.weapons.length ? s.weapons : ["pulse"];
@@ -1656,10 +1656,10 @@ export class Engine {
 
   private localBombFx(x: number, y: number) {
     for (const b of this.bullets) if (b.from === "e") b.dead = true;
-    // Cải thiện hiệu suất: giảm particle trong bomb fx
+    // Performance: reduce particles in bomb fx
     this.parts.push({ x, y, vx: 0, vy: 0, life: 0.5, max: 0.5, size: 18, color: "#ffffff", kind: "ring" });
     this.parts.push({ x, y, vx: 0, vy: 0, life: 0.6, max: 0.6, size: 9, color: "#00f0ff", kind: "ring" });
-    this.sparks(x, y, "#ffd23f", 18); // giảm từ 26 xuống 18
+    this.sparks(x, y, "#ffd23f", 18); // reduced from 26 to 18
     this.shake = Math.min(30, this.shake + 22);
     this.flashWhite = 0.5;
     audio.bomb();
@@ -1765,7 +1765,7 @@ export class Engine {
         if (e.t < 0.5) {
           e.y += 260 * dt;
         } else if (e.t < 0.9) {
-          e.x += Math.sin(e.t * 50) * 1.4; // rung báo hiệu
+          e.x += Math.sin(e.t * 50) * 1.4; // warning shake
           if (e.dashVx === 0 && e.dashVy === 0) {
             const p = this.nearestPlayer(e.x, e.y);
             const tx = p ? p.x : e.x;
@@ -2009,13 +2009,13 @@ export class Engine {
         break;
       }
       case "wraith": {
-        // wraith di chuyển nhanh và zigzag
+        // wraith moves fast and zigzags
         if (e.y < e.anchorY) {
           e.y += Math.min(280, 180 + w * 8) * dt;
         } else if (e.t < 8) {
           e.x = e.baseX + Math.sin(e.t * 3.5 + e.phase) * 120;
           e.y = e.anchorY + Math.sin(e.t * 2.1) * 20;
-          // wraith không bắn thường mà chỉ đâm vào người chơi
+          // wraith doesn't shoot normally, it just rams the player
           if (e.t > 1.5 && e.dashVx === 0 && e.dashVy === 0) {
             const p = this.nearestPlayer(e.x, e.y);
             if (p && Math.random() < 0.02) {
@@ -2035,7 +2035,7 @@ export class Engine {
         break;
       }
       case "bomber": {
-        // bomber đứng yên và ném bom theo chùm
+        // bomber stays still and drops bombs in a cluster
         if (e.y < e.anchorY) {
           e.y += 100 * dt;
         } else if (e.t < 10) {
@@ -2043,7 +2043,7 @@ export class Engine {
           e.shootT -= dt;
           if (e.shootT <= 0) {
             e.shootT = 1.8;
-            // ném 3 quả bom theo hình quạt
+            // drop 3 bombs in a fan pattern
             const p = this.nearestPlayer(e.x, e.y);
             const baseAngle = p ? Math.atan2(p.y - e.y, p.x - e.x) : Math.PI / 2;
             for (let i = -1; i <= 1; i++) {
@@ -2064,7 +2064,7 @@ export class Engine {
         break;
       }
       case "splitter": {
-        // splitter di chuyển xoắn ốc và phân chia khi chết (xử lý ở killEnemy)
+        // splitter spirals and splits on death (handled in killEnemy)
         if (e.y < e.anchorY) {
           e.y += 140 * dt;
         } else if (e.t < 9) {
@@ -2074,7 +2074,7 @@ export class Engine {
           e.shootT -= dt;
           if (e.shootT <= 0) {
             e.shootT = 1.2;
-            // bắn 5 viên theo hình sao
+            // fire 5 shots in a star pattern
             const count = 5;
             const off = e.t;
             for (let i = 0; i < count; i++) {
@@ -2095,7 +2095,7 @@ export class Engine {
         break;
       }
       case "hunter": {
-        // hunter truy đuổi người chơi gần nhất
+        // hunter chases the nearest player
         if (e.y < e.anchorY) {
           e.y += 200 * dt;
         } else if (e.t < 10) {
@@ -2118,7 +2118,7 @@ export class Engine {
         break;
       }
       case "sentinel": {
-        // sentinel đứng yên tại vị trí cao và bắn đạn chậm nhưng dày đặc
+        // sentinel stays still at a high position and fires slow but dense bullets
         if (e.y < e.anchorY) {
           e.y += 80 * dt;
         } else if (e.t < 12) {
@@ -2131,7 +2131,7 @@ export class Engine {
           if (e.burst > 0) {
             e.burst--;
             e.shootT = 0.08;
-            // bắn 3 hướng
+            // fire in 3 directions
             const p = this.nearestPlayer(e.x, e.y);
             const baseAngle = p ? Math.atan2(p.y - e.y, p.x - e.x) : Math.PI / 2;
             for (let i = -1; i <= 1; i++) {
@@ -2298,10 +2298,10 @@ export class Engine {
     this.picks.push({ id: this.idc++, type, x, y, t: 0, tx: x, ty: y });
   }
 
-  /* ---------------- hiệu ứng ---------------- */
+/* ---------------- effects ---------------- */
 
   private explode(x: number, y: number, color: string, power: number) {
-    // Cải thiện hiệu suất: giảm số particle nhưng vẫn giữ hiệu ứng đẹp
+    // Performance: reduce particle count while keeping nice visuals
     const n = Math.floor(8 + power * 7); // giảm từ 10+ xuống 8+
     for (let i = 0; i < n; i++) {
       const a = rand(0, TAU);
@@ -2321,7 +2321,7 @@ export class Engine {
     }
     this.parts.push({ x, y, vx: 0, vy: 0, life: 0.35, max: 0.35, size: 5, color, kind: "ring" });
     this.shake = Math.min(30, this.shake + 2 + power * 3.5);
-    // Tối ưu: giới hạn particle nghiêm ngặt hơn
+    // Optimize: stricter particle limits
     if (this.parts.length > 350) this.parts.splice(0, this.parts.length - 350);
     audio.boom(power);
   }
