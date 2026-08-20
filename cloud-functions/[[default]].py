@@ -3,8 +3,9 @@ import json
 import time
 
 from rabbit import INSTANCE_ID, RabbitHub
-from sanic import Sanic, Websocket
+from sanic import Sanic
 from sanic import json as json_response
+from sanic.response import HTTPResponse
 
 app = Sanic("PixelRushServer")
 
@@ -12,19 +13,17 @@ app = Sanic("PixelRushServer")
 PORT = 8000
 MAX_PLAYERS = 2
 HEARTBEAT_SECONDS = 10
+# Long-poll timeout: how long /poll holds an open connection waiting for messages.
+# Keep below EdgeOne's upstream timeout (~30s).
+POLL_TIMEOUT = 20
 
-# In-memory Socket Manager — only holds the real WebSocket connections of THIS INSTANCE
-# Shape: { "ROOM_CODE": [ {"id": "p1", "ws": WebConnection, "name": "...", "color": "...", "joined_at": ...}, ... ] }
-CONNECTED_ROOMS = {}
+# Players on THIS instance.
+# Shape: { "ROOM_CODE": [ {"id", "name", "color", "joined_at", "queue": asyncio.Queue}, ... ] }
+CONNECTED_ROOMS: dict[str, list] = {}
+
 # Shared room registry — merged from every instance via RabbitMQ.
-# Shape: {
-#   "ROOM_CODE": {
-#       "room", "players": [{"id","name","color","joined_at"}...],
-#       "status", "max", "ts",
-#       "src_ts": { instance_id: ts }   # last timestamp seen from each instance
-#   }
-# }
-ROOM_REGISTRY = {}
+ROOM_REGISTRY: dict[str, dict] = {}
+
 seq = 0
 
 # RabbitMQ hub — shares state & routes messages between instances
@@ -32,18 +31,16 @@ hub = RabbitHub()
 
 
 # --- Helper Functions ---
+
 def room_players(room_code: str) -> list:
-    """Players of a room (local + remote) from the registry."""
     return ROOM_REGISTRY.get(room_code, {}).get("players", [])
 
 
 def sort_players(players: list) -> list:
-    """Sort by join order — ensures every instance picks the same host."""
     return sorted(players, key=lambda p: (p.get("joined_at", 0), p.get("id", "")))
 
 
 def rooms_from_registry() -> list:
-    """List rooms from the shared registry (all instances)."""
     return [
         {
             "room": code,
@@ -56,26 +53,19 @@ def rooms_from_registry() -> list:
     ]
 
 
-async def broadcast(room_code: str, message_dict: dict, except_id: str | None = None):
-    """Send a message to the LOCAL clients in a room (except except_id)."""
-    clients = CONNECTED_ROOMS.get(room_code, [])
-    payload = json.dumps(message_dict)
-
-    for client in list(clients):
+async def enqueue(room_code: str, message_dict: dict, except_id: str | None = None):
+    """Push a message into every LOCAL player's queue (except except_id)."""
+    for client in list(CONNECTED_ROOMS.get(room_code, [])):
         if client["id"] != except_id:
             try:
-                await client["ws"].send(payload)
-            except Exception as e:
-                print(f"[WS Broadcast Error] {client['id']}: {e}")
+                client["queue"].put_nowait(message_dict)
+            except asyncio.QueueFull:
+                pass
 
 
 async def relay(room_code: str, message_dict: dict, except_id: str | None = None):
-    """Broadcast locally + publish to RabbitMQ so other instances receive it.
-
-    Messages this instance published itself are ignored by its own consumer
-    (via src), so there is no duplication with the local broadcast.
-    """
-    await broadcast(room_code, message_dict, except_id)
+    """Enqueue locally + publish to RabbitMQ so other instances receive it."""
+    await enqueue(room_code, message_dict, except_id)
     try:
         await hub.publish_room_msg(room_code, message_dict)
     except Exception as e:
@@ -83,12 +73,7 @@ async def relay(room_code: str, message_dict: dict, except_id: str | None = None
 
 
 async def publish_room_state(room_code: str, deleted: bool = False):
-    """Update the local registry + publish a room-state snapshot to RabbitMQ.
-
-    The snapshot contains this instance's LOCAL players + the REMOTE players
-    known from the registry — every instance publishes a full snapshot, so the
-    registry converges correctly.
-    """
+    """Update the local registry + publish a room-state snapshot to RabbitMQ."""
     current = ROOM_REGISTRY.get(room_code, {})
     local_ids = {c["id"] for c in CONNECTED_ROOMS.get(room_code, [])}
     merged = [p for p in current.get("players", []) if p["id"] not in local_ids]
@@ -133,7 +118,6 @@ async def handle_room_state(room_code: str, payload: dict):
     src = str(payload.get("src", ""))
     event_ts = payload.get("ts", 0)
     current = ROOM_REGISTRY.get(room_code, {})
-    # Ignore older snapshots from the same instance — avoids resurrecting departed players
     if event_ts < current.get("src_ts", {}).get(src, 0):
         return
 
@@ -162,40 +146,86 @@ async def handle_room_state(room_code: str, payload: dict):
 
 
 async def handle_room_msg(room_code: str, message: dict):
-    """Broadcast a message from another instance to the local clients in a room."""
-    await broadcast(room_code, message)
+    """Deliver a message from another instance to local players."""
+    await enqueue(room_code, message)
 
 
 async def handle_sync_request():
-    """Another instance just connected — republish all local rooms so it can bootstrap."""
     for room_code in list(CONNECTED_ROOMS.keys()):
         await publish_room_state(room_code)
 
 
 async def heartbeat_loop():
-    """Periodically publish local room state — helps new instances bootstrap
-    the registry and discover rooms that are still alive."""
     while True:
         await asyncio.sleep(HEARTBEAT_SECONDS)
+        now = time.time()
         for room_code in list(CONNECTED_ROOMS.keys()):
+            # Evict players whose last_seen is stale (no poll in 2× poll timeout)
+            stale_ids = {
+                c["id"]
+                for c in CONNECTED_ROOMS.get(room_code, [])
+                if now - c.get("last_seen", now) > POLL_TIMEOUT * 2
+            }
+            if stale_ids:
+                for sid in stale_ids:
+                    await _remove_player(room_code, sid)
             try:
                 await publish_room_state(room_code)
             except Exception as e:
                 print(f"[Heartbeat] publish {room_code} failed: {e}")
 
 
-# --- HTTP Routes ---
+async def _remove_player(room_code: str, player_id: str):
+    """Remove a player from local state, publish updates, transfer host if needed."""
+    if room_code not in CONNECTED_ROOMS:
+        return
+    CONNECTED_ROOMS[room_code] = [
+        c for c in CONNECTED_ROOMS[room_code] if c["id"] != player_id
+    ]
+    remaining = [p for p in room_players(room_code) if p["id"] != player_id]
 
+    await relay(room_code, {"t": "peer-leave", "id": player_id})
+
+    if not CONNECTED_ROOMS.get(room_code):
+        CONNECTED_ROOMS.pop(room_code, None)
+        await publish_room_state(room_code, deleted=True)
+        try:
+            await hub.unbind_room(room_code)
+        except Exception:
+            pass
+    else:
+        current = ROOM_REGISTRY.get(room_code, {})
+        src_ts = dict(current.get("src_ts", {}))
+        src_ts[INSTANCE_ID] = time.time()
+        ROOM_REGISTRY[room_code] = {
+            "room": room_code,
+            "players": sort_players(remaining),
+            "status": current.get("status", "lobby"),
+            "max": MAX_PLAYERS,
+            "ts": time.time(),
+            "src_ts": src_ts,
+        }
+        await publish_room_state(room_code)
+        if remaining:
+            await relay(room_code, {"t": "host", "id": remaining[0]["id"]})
+
+
+def _find_client(room_code: str, player_id: str) -> dict | None:
+    for c in CONNECTED_ROOMS.get(room_code, []):
+        if c["id"] == player_id:
+            return c
+    return None
+
+
+# --- HTTP Routes ---
 
 @app.get("/rooms")
 async def get_rooms(request):
-    """API: list of open rooms — from the shared registry (all instances)."""
     return json_response({"maxPlayers": MAX_PLAYERS, "rooms": rooms_from_registry()})
 
 
 @app.get("/status")
 async def get_status(request):
-    """API: server debug info."""
     return json_response(
         {
             "name": "PIXEL RUSH Python relay server",
@@ -210,179 +240,156 @@ async def get_status(request):
     )
 
 
-# --- WebSocket Route ---
+# --- HTTP Polling API ---
 
-
-@app.websocket("/ws")
-async def ws_relay(request, ws: Websocket):
+@app.post("/join/<room_code:str>")
+async def join_room(request, room_code: str):
+    """Join or create a room. Returns {id, youHost, peers, maxPlayers}."""
     global seq
+    room_code = room_code.strip().upper()
 
-    room_code = request.args.get("room", "DEFAULT").strip().upper()
-    seq += 1
-    player_id = f"{INSTANCE_ID}-p{seq}"
-
-    # Reject if the room is full based on the shared registry (local + remote)
     if len(room_players(room_code)) >= MAX_PLAYERS:
-        await ws.send(json.dumps({"t": "error", "msg": "Room is full"}))
-        await ws.close(code=4001, reason="room full")
-        return
+        return json_response({"error": "Room is full"}, status=409)
 
-    # Create the local room if missing + bind the queue to receive messages from other instances
     if room_code not in CONNECTED_ROOMS:
         CONNECTED_ROOMS[room_code] = []
         try:
             await hub.bind_room(room_code)
         except Exception as e:
-            print(f"[WS] bind room {room_code} failed: {e}")
+            print(f"[Join] bind room {room_code} failed: {e}")
 
-    clients = CONNECTED_ROOMS[room_code]
-
-    # The first player (across the whole system) is the HOST
+    seq += 1
+    player_id = f"{INSTANCE_ID}-p{seq}"
     you_host = len(room_players(room_code)) == 0
 
+    body: dict = request.json or {}
     client_info = {
         "id": player_id,
-        "ws": ws,
-        "name": "Pilot",
-        "color": "#888",
+        "name": str(body.get("name", "Pilot"))[:32],
+        "color": str(body.get("color", "#888"))[:16],
         "joined_at": time.time(),
+        "last_seen": time.time(),
+        "queue": asyncio.Queue(maxsize=256),
     }
-    clients.append(client_info)
-
-    # Update the local registry + publish so other instances know
+    CONNECTED_ROOMS[room_code].append(client_info)
     await publish_room_state(room_code)
 
-    # Welcome — peers come from the registry (includes players on other instances)
     existing_peers = [
         {"id": p["id"], "name": p["name"], "color": p["color"]}
         for p in room_players(room_code)
         if p["id"] != player_id
     ]
 
-    await ws.send(
-        json.dumps(
-            {
-                "t": "welcome",
-                "id": player_id,
-                "room": room_code,
-                "youHost": you_host,
-                "maxPlayers": MAX_PLAYERS,
-                "peers": existing_peers,
-            }
-        )
+    return json_response(
+        {
+            "id": player_id,
+            "room": room_code,
+            "youHost": you_host,
+            "maxPlayers": MAX_PLAYERS,
+            "peers": existing_peers,
+        }
     )
 
+
+@app.get("/poll/<room_code:str>/<player_id:str>")
+async def poll(request, room_code: str, player_id: str):
+    """Long-poll: holds the connection until a message arrives or timeout.
+    Returns {messages: [...]}. Client should call again immediately after."""
+    room_code = room_code.strip().upper()
+    client = _find_client(room_code, player_id)
+    if client is None:
+        return json_response({"error": "Not in room"}, status=404)
+
+    client["last_seen"] = time.time()
+
+    messages = []
     try:
-        # Loop receiving data over the WebSocket
-        async for msg_str in ws:
-            try:
-                m = json.loads(msg_str)
-            except ValueError:
-                continue  # skip non-JSON frames
+        # Block until at least one message arrives, then drain the rest
+        first = await asyncio.wait_for(client["queue"].get(), timeout=POLL_TIMEOUT)
+        messages.append(first)
+        while not client["queue"].empty():
+            messages.append(client["queue"].get_nowait())
+    except asyncio.TimeoutError:
+        pass  # return empty list — client re-polls
 
-            t = str(m.get("t", ""))
+    return json_response({"messages": messages})
 
-            if t == "join":
-                client_info["name"] = str(m.get("name", client_info["name"]))
-                client_info["color"] = str(m.get("color", client_info["color"]))
-                await publish_room_state(room_code)
-                await relay(
-                    room_code,
-                    {
-                        "t": "peer-join",
-                        "from": player_id,
-                        "id": player_id,
-                        "name": client_info["name"],
-                        "color": client_info["color"],
-                    },
-                    except_id=player_id,
-                )
-                continue
 
-            elif t == "bye":
-                await ws.close(code=1000, reason="bye")
-                break
+@app.post("/send/<room_code:str>/<player_id:str>")
+async def send_msg(request, room_code: str, player_id: str):
+    """Send a message from a player to the room."""
+    room_code = room_code.strip().upper()
+    client = _find_client(room_code, player_id)
+    if client is None:
+        return json_response({"error": "Not in room"}, status=404)
 
-            elif t == "start":
-                ROOM_REGISTRY.setdefault(
-                    room_code,
-                    {
-                        "room": room_code,
-                        "players": [],
-                        "status": "lobby",
-                        "max": MAX_PLAYERS,
-                        "ts": 0,
-                        "src_ts": {},
-                    },
-                )["status"] = "battle"
-                await publish_room_state(room_code)
-            elif t == "lobby":
-                ROOM_REGISTRY.setdefault(
-                    room_code,
-                    {
-                        "room": room_code,
-                        "players": [],
-                        "status": "lobby",
-                        "max": MAX_PLAYERS,
-                        "ts": 0,
-                        "src_ts": {},
-                    },
-                )["status"] = "lobby"
-                await publish_room_state(room_code)
+    client["last_seen"] = time.time()
 
-            # Relay WebRTC signaling & game state to the other peers
-            m["from"] = player_id
-            await relay(room_code, m, except_id=player_id)
+    try:
+        m: dict = request.json or {}
+    except Exception:
+        return json_response({"error": "Invalid JSON"}, status=400)
 
-    except Exception as e:
-        print(f"[WS Exception] {player_id}: {e}")
-    finally:
-        # Handle disconnect
-        if room_code in CONNECTED_ROOMS:
-            CONNECTED_ROOMS[room_code] = [
-                c for c in CONNECTED_ROOMS[room_code] if c["id"] != player_id
-            ]
+    t = str(m.get("t", ""))
 
-            # Remove the departed player from the registry
-            remaining = [p for p in room_players(room_code) if p["id"] != player_id]
+    if t == "join":
+        # The client chooses a free color after receiving the existing peer list.
+        client["name"] = str(m.get("name", client["name"]))[:32]
+        client["color"] = str(m.get("color", client["color"]))[:16]
+        await publish_room_state(room_code)
+        await relay(
+            room_code,
+            {
+                "t": "peer-join",
+                "id": player_id,
+                "name": client["name"],
+                "color": client["color"],
+            },
+            except_id=player_id,
+        )
+    elif t == "bye":
+        await _remove_player(room_code, player_id)
+    elif t == "start":
+        ROOM_REGISTRY.setdefault(
+            room_code,
+            {"room": room_code, "players": [], "status": "lobby", "max": MAX_PLAYERS, "ts": 0, "src_ts": {}},
+        )["status"] = "battle"
+        await publish_room_state(room_code)
+        m["from"] = player_id
+        await relay(room_code, m, except_id=player_id)
+    elif t == "lobby":
+        ROOM_REGISTRY.setdefault(
+            room_code,
+            {"room": room_code, "players": [], "status": "lobby", "max": MAX_PLAYERS, "ts": 0, "src_ts": {}},
+        )["status"] = "lobby"
+        await publish_room_state(room_code)
+        m["from"] = player_id
+        await relay(room_code, m, except_id=player_id)
+    else:
+        m["from"] = player_id
+        await relay(room_code, m, except_id=player_id)
 
-            await relay(room_code, {"t": "peer-leave", "id": player_id})
+    return json_response({"ok": True})
 
-            if len(remaining) == 0:
-                # Room is empty — remove from registry, publish deleted, unbind the queue
-                del CONNECTED_ROOMS[room_code]
-                await publish_room_state(room_code, deleted=True)
-                try:
-                    await hub.unbind_room(room_code)
-                except Exception as e:
-                    print(f"[WS] unbind room {room_code} failed: {e}")
-            else:
-                # Update the registry with the remaining players + publish
-                current = ROOM_REGISTRY.get(room_code, {})
-                src_ts = dict(current.get("src_ts", {}))
-                src_ts[INSTANCE_ID] = time.time()
-                ROOM_REGISTRY[room_code] = {
-                    "room": room_code,
-                    "players": sort_players(remaining),
-                    "status": current.get("status", "lobby"),
-                    "max": MAX_PLAYERS,
-                    "ts": time.time(),
-                    "src_ts": src_ts,
-                }
-                await publish_room_state(room_code)
-                # Transfer Host to the first remaining player (each client checks its own id)
-                await relay(room_code, {"t": "host", "id": remaining[0]["id"]})
+
+@app.post("/leave/<room_code:str>/<player_id:str>")
+async def leave_room(request, room_code: str, player_id: str):
+    """Explicit leave (called on page unload / quit)."""
+    room_code = room_code.strip().upper()
+    await _remove_player(room_code, player_id)
+    return json_response({"ok": True})
 
 
 # --- Startup ---
 
-
 @app.before_server_start
 async def setup(app, loop):
+    hub.on_room_state = handle_room_state
+    hub.on_room_msg = handle_room_msg
+    hub.on_sync_request = handle_sync_request
     try:
         await hub.connect()
         print(f"[RabbitMQ] Connected as instance {INSTANCE_ID}")
-        # Ask other instances to republish their state to bootstrap the registry
         await hub.request_sync()
     except Exception as e:
         print(f"[RabbitMQ] Connection failed — running single-instance mode: {e}")

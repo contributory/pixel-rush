@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "edgeone makers dev",
     "build": "vite build",
     "start": "node main.ts",
     "typecheck": "tsc --noEmit"

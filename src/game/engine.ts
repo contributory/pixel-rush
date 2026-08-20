@@ -6,7 +6,7 @@
    ============================================================ */
 
 import { audio } from "./audio";
-import { NetClient, roomWsUrl, type NetMsg, type PeerInfo } from "./net";
+import { NetClient, normalizeHttpOrigin, type NetMsg, type PeerInfo } from "./net";
 import type {
   Phase, Role, OverStats, HudPlayer, HudData, NetInfo, EngineCallbacks,
   Bullet, EnemyType, Enemy, WeaponType, Pickup, Particle, Pop, ShipState, SpawnEntry,
@@ -359,9 +359,8 @@ export class Engine {
     net.onMsg = (m) => this.handleNet(m);
     net.onPeers = () => this.emitNet();
     net.onClose = () => this.handleDisconnect();
-    // Normalize server URL (handles bare host, http(s), trailing /ws, etc.)
-    const wsUrl = roomWsUrl(urlBase, room);
-    if (!wsUrl.startsWith("ws")) {
+    const httpUrl = normalizeHttpOrigin(urlBase);
+    if (!httpUrl.startsWith("http")) {
       this.net = null;
       this.role = "solo";
       this.setPhase("menu");
@@ -371,7 +370,7 @@ export class Engine {
     try {
       // pick the first palette color nobody in the room already uses
       let myColor = PALETTE[0];
-      await net.connect(wsUrl, name, (peers) => {
+      await net.connect(httpUrl, room, name, (peers) => {
         const used = new Set(peers.map((p) => p.color));
         myColor = PALETTE.find((c) => !used.has(c)) ?? PALETTE[peers.length % PALETTE.length];
         return myColor;

@@ -171,7 +171,7 @@ function genRoomCode(): string {
 }
 
 const TICKER =
-  "INSERT COIN ▸ 1 CREDIT — 1 PLAY ▸ CO-OP UP TO 2 PILOTS OVER WEBSOCKET ▸ DENO RELAY — WS URL AUTO-DETECTED FROM PAGE ADDRESS ▸ BGM: PIXEL RUSH ▸ AUTO-FIRE ▸ K = BOMB ▸ BOSS EVERY 5TH WAVE ▸ ";
+  "INSERT COIN ▸ 1 CREDIT — 1 PLAY ▸ CO-OP UP TO 2 PILOTS OVER HTTP ▸ RABBITMQ RELAY — SERVER AUTO-DETECTED FROM PAGE ADDRESS ▸ BGM: PIXEL RUSH ▸ AUTO-FIRE ▸ K = BOMB ▸ BOSS EVERY 5TH WAVE ▸ ";
 
 function Ticker() {
   return (
@@ -242,7 +242,7 @@ function MenuScreen(p: MenuProps) {
           <p className="mt-5 max-w-md text-dim text-sm sm:text-base font-medium leading-relaxed">
             Tear through enemy formations in a storm of neon bullets. Fly{" "}
             <span className="text-neon font-semibold">solo</span> or squad up —{" "}
-            <span className="text-hot font-semibold">co-op for up to 2 pilots</span> over WebSocket. Shared
+            <span className="text-hot font-semibold">co-op for up to 2 pilots</span> over HTTP. Shared
             score, shared bombs, shared fate.
           </p>
 
@@ -365,7 +365,7 @@ function MenuScreen(p: MenuProps) {
               {/* connection settings */}
               <div className="grid sm:grid-cols-[1fr_1fr] gap-2 mt-3 pt-3 border-t border-line/70">
                 <label className="block sm:col-span-2">
-                  <span className="text-[10px] uppercase tracking-wider text-dim font-semibold">WS server</span>
+                  <span className="text-[10px] uppercase tracking-wider text-dim font-semibold">HTTP server</span>
                   <div className="flex items-center gap-1.5 mt-1">
                     <input
                       value={p.server}
@@ -375,7 +375,7 @@ function MenuScreen(p: MenuProps) {
                     />
                     <button
                       onClick={p.onAutoServer}
-                      title="Auto-detect from page address (same host, port 8000)"
+                      title="Auto-detect from page address"
                       className="btn-arcade shrink-0 text-[7px] px-2 py-2 bg-ink text-dim hover:text-neon"
                     >
                       AUTO
@@ -407,7 +407,7 @@ function MenuScreen(p: MenuProps) {
                   Server offline. Run{" "}
                   <code className="text-acid">deno run -A main.ts</code>{" "}
                   — it serves the game and the relay on the same address, or press{" "}
-                  <b className="text-neon">AUTO</b> / edit the WS server above.
+                  <b className="text-neon">AUTO</b> / edit the HTTP server above.
                 </p>
               ) : p.rooms.length === 0 ? (
                 <p className="text-[10px] text-dim/80 leading-snug bg-ink/60 border border-line px-2.5 py-2">
@@ -970,7 +970,7 @@ export default function App() {
     setJoinErr(null);
     const origin = normalizeWsOrigin(server);
     if (!origin) {
-      setJoinErr("Enter a valid WS server address");
+      setJoinErr("Enter a valid HTTP server address");
       return;
     }
     // Persist the normalized form so next time AUTO/localStorage is clean
@@ -999,7 +999,7 @@ export default function App() {
     setJoinErr(null);
     const origin = normalizeWsOrigin(server);
     if (!origin) {
-      setJoinErr("Enter a valid WS server address");
+      setJoinErr("Enter a valid HTTP server address");
       return;
     }
     if (origin !== server) setServer(origin);
@@ -1072,7 +1072,7 @@ export default function App() {
         />
       )}
 
-      {phase === "connecting" && <ConnectingScreen server={`${server}/ws?room=${room}`} onCancel={() => eng()?.quitToMenu()} />}
+      {phase === "connecting" && <ConnectingScreen server={`${server}/join/${room}`} onCancel={() => eng()?.quitToMenu()} />}
 
       {phase === "paused" && (
         <PauseScreen onResume={() => eng()?.togglePause()} onQuit={() => eng()?.quitToMenu()} />

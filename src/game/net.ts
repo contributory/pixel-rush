@@ -1,4 +1,4 @@
-/* WebSocket client for co-op mode. JSON protocol, relay server (see main.ts). */
+/* HTTP long-poll client for co-op mode. RabbitMQ remains server-side only. */
 
 export type NetMsg = Record<string, unknown> & { t: string; from?: string };
 
@@ -15,72 +15,66 @@ export interface RoomInfo {
   status?: "lobby" | "battle";
 }
 
-/**
- * Normalize a user/server URL into a clean WebSocket origin (no trailing slash,
- * no trailing /ws). Accepts ws://, wss://, http://, https://, or bare host.
- */
-export function normalizeWsOrigin(raw: string): string {
-  let u = raw.trim();
-  if (!u) return "";
-  // Bare host → assume current page protocol (ws/wss)
-  if (!/^[a-z][a-z0-9+.-]*:/i.test(u)) {
-    const proto = typeof window !== "undefined" && window.location.protocol === "https:"
-      ? "wss://"
-      : "ws://";
-    u = proto + u;
+/** Normalize http(s), ws(s), or a bare hostname to an HTTP origin. */
+export function normalizeHttpOrigin(raw: string): string {
+  let value = raw.trim();
+  if (!value) return "";
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(value)) {
+    const protocol = typeof window !== "undefined" && window.location.protocol === "https:"
+      ? "https://"
+      : "http://";
+    value = protocol + value;
   }
-  // http(s) → ws(s)
-  u = u.replace(/^http\b/i, "ws");
-  // strip path/query: we only want origin (+ optional path prefix without /ws)
+  value = value.replace(/^ws:/i, "http:").replace(/^wss:/i, "https:");
   try {
-    const parsed = new URL(u);
-    let path = parsed.pathname.replace(/\/+$/, "");
-    // Drop a trailing /ws segment (common when users paste the WS endpoint)
-    path = path.replace(/\/ws$/i, "");
-    // Origin only + optional non-/ws path prefix
-    const origin = `${parsed.protocol}//${parsed.host}`;
-    return path && path !== "/" ? `${origin}${path}` : origin;
+    const parsed = new URL(value);
+    const path = parsed.pathname.replace(/\/+$/, "").replace(/\/ws$/i, "");
+    return `${parsed.origin}${path && path !== "/" ? path : ""}`;
   } catch {
-    return u.replace(/\/$/, "").replace(/\/ws$/i, "");
+    return "";
   }
 }
 
-/** WebSocket URL for a room: <origin>/ws?room=CODE */
-export function roomWsUrl(server: string, room: string): string {
-  const origin = normalizeWsOrigin(server);
-  return `${origin}/ws?room=${encodeURIComponent(room.trim().toUpperCase())}`;
+/** Backward-compatible alias for server values saved by older releases. */
+export const normalizeWsOrigin = normalizeHttpOrigin;
+
+export function defaultHttpUrl(): string {
+  return window.location.origin;
 }
 
-/** HTTP base for REST (/rooms, /status) derived from a WS server string. */
-export function httpBase(wsUrl: string): string {
-  return normalizeWsOrigin(wsUrl).replace(/^ws/i, "http");
-}
+/** Backward-compatible alias used by existing UI state. */
+export const defaultWsUrl = defaultHttpUrl;
 
-/**
- * Auto-derive the relay server address from the page URL.
- * Production (edgeone / pixel-rush host) and local same-origin both use the
- * page host — the /ws path is appended later by roomWsUrl().
- */
-export function defaultWsUrl(): string {
-  const proto = window.location.protocol === "https:" ? "wss://" : "ws://";
-  return `${proto}${window.location.host}`;
+export function httpBase(server: string): string {
+  return normalizeHttpOrigin(server);
 }
 
 /** Ask the server for the list of open rooms. Throws when unreachable. */
-export async function fetchRooms(wsUrl: string): Promise<RoomInfo[]> {
-  const ctrl = new AbortController();
-  const timer = window.setTimeout(() => ctrl.abort(), 2500);
+export async function fetchRooms(server: string): Promise<RoomInfo[]> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 2500);
   try {
-    const base = httpBase(wsUrl);
-    const res = await fetch(`${base}/rooms`, {
-      signal: ctrl.signal,
+    const base = httpBase(server);
+    if (!base) throw new Error("Invalid server address");
+    const response = await fetch(`${base}/rooms`, {
+      signal: controller.signal,
+      cache: "no-store",
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = (await res.json()) as { rooms?: RoomInfo[] };
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = (await response.json()) as { rooms?: RoomInfo[] };
     return data.rooms ?? [];
   } finally {
     window.clearTimeout(timer);
   }
+}
+
+interface JoinResponse {
+  id?: string;
+  room?: string;
+  youHost?: boolean;
+  maxPlayers?: number;
+  peers?: PeerInfo[];
+  error?: string;
 }
 
 export class NetClient {
@@ -92,284 +86,247 @@ export class NetClient {
   onMsg: ((m: NetMsg) => void) | null = null;
   onPeers: ((peers: PeerInfo[]) => void) | null = null;
   onClose: (() => void) | null = null;
-  private ws: WebSocket | null = null;
-  private closedByMe = false;
 
-  // WebRTC
+  private base = "";
+  private closedByMe = false;
+  private joined = false;
+  private pollController: AbortController | null = null;
+  private sendChain: Promise<void> = Promise.resolve();
+
   private pc: RTCPeerConnection | null = null;
   private dataChannel: RTCDataChannel | null = null;
   private pendingCandidates: RTCIceCandidateInit[] = [];
 
   get open(): boolean {
-    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+    return this.joined && !this.closedByMe;
   }
 
-  connect(
-    url: string,
+  async connect(
+    server: string,
+    room: string,
     name: string,
     colorFor: (peers: PeerInfo[]) => string,
   ): Promise<void> {
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      let ws: WebSocket;
-      try {
-        ws = new WebSocket(url);
-      } catch (e) {
-        reject(e instanceof Error ? e : new Error("Invalid server address"));
-        return;
+    this.base = normalizeHttpOrigin(server);
+    this.room = room.trim().toUpperCase();
+    this.closedByMe = false;
+    if (!this.base || !this.room) throw new Error("Invalid server address or room");
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 7000);
+    let response: Response;
+    try {
+      response = await fetch(`${this.base}/join/${encodeURIComponent(this.room)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, color: "" }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new Error("Connection timed out");
       }
-      this.ws = ws;
-      this.closedByMe = false;
-
-      const timer = window.setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          this.close();
-          reject(new Error("Connection timed out"));
-        }
-      }, 7000);
-
-      ws.onmessage = async (ev) => {
-        let m: NetMsg;
-        try {
-          m = JSON.parse(String(ev.data)) as NetMsg;
-        } catch {
-          return;
-        }
-        if (m.t === "welcome") {
-          this.id = String(m.id ?? "");
-          this.youHost = !!m.youHost;
-          this.room = String(m.room ?? "");
-          this.maxPlayers = Number(m.maxPlayers ?? 2);
-          this.peers = (m.peers as PeerInfo[]) ?? [];
-          ws.send(
-            JSON.stringify({ t: "join", name, color: colorFor(this.peers) }),
-          );
-          window.clearTimeout(timer);
-          if (!settled) {
-            settled = true;
-            resolve();
-          }
-          this.onPeers?.([...this.peers]);
-          return;
-        }
-
-        // WebRTC Signaling messages
-        if (m.t === "offer") {
-          await this.handleOffer(m.offer as RTCSessionDescriptionInit);
-          return;
-        }
-        if (m.t === "answer") {
-          await this.handleAnswer(m.answer as RTCSessionDescriptionInit);
-          return;
-        }
-        if (m.t === "ice-candidate") {
-          await this.handleIceCandidate(m.candidate as RTCIceCandidateInit);
-          return;
-        }
-
-        if (m.t === "peer-join") {
-          this.peers = [
-            ...this.peers,
-            { id: String(m.id), name: String(m.name), color: String(m.color) },
-          ];
-          this.onPeers?.([...this.peers]);
-        } else if (m.t === "peer-leave") {
-          this.peers = this.peers.filter((p) => p.id !== m.id);
-          this.onPeers?.([...this.peers]);
-        }
-        this.onMsg?.(m);
-      };
-
-      ws.onerror = () => {
-        if (!settled) {
-          settled = true;
-          window.clearTimeout(timer);
-          reject(new Error("Cannot reach the server"));
-        }
-      };
-
-      ws.onclose = () => {
-        if (!settled) {
-          settled = true;
-          window.clearTimeout(timer);
-          reject(new Error("Connection closed by the server"));
-        } else if (!this.closedByMe) {
-          this.onClose?.();
-        }
-      };
-    });
-  }
-
-  // WebRTC is intentionally created only when the host starts a 2-player match.
-  async startWebRTC(): Promise<void> {
-    if (this.peers.length !== 1) {
-      throw new Error("WebRTC requires exactly 2 players in the room");
+      throw new Error("Cannot reach the server");
+    } finally {
+      window.clearTimeout(timer);
     }
-    if (this.pc) return;
-    await this.setupWebRTC();
+
+    const data = (await response.json().catch(() => ({}))) as JoinResponse;
+    if (!response.ok) throw new Error(data.error || `Server returned HTTP ${response.status}`);
+    if (!data.id) throw new Error("Invalid response from server");
+
+    this.id = data.id;
+    this.room = data.room || this.room;
+    this.youHost = !!data.youHost;
+    this.maxPlayers = Number(data.maxPlayers ?? 2);
+    this.peers = data.peers ?? [];
+    this.joined = true;
+    this.onPeers?.([...this.peers]);
+
+    await this.post({ t: "join", name, color: colorFor(this.peers) });
+    void this.pollLoop();
   }
 
-  // --- WebRTC Methods ---
-
-  private async setupWebRTC() {
-    const iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
-    this.pc = new RTCPeerConnection({ iceServers });
-
-    this.pc.onicecandidate = (e) => {
-      if (e.candidate && this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(
-          JSON.stringify({
-            t: "ice-candidate",
-            candidate: e.candidate,
-          }),
+  private async pollLoop(): Promise<void> {
+    let failures = 0;
+    while (this.open) {
+      this.pollController = new AbortController();
+      try {
+        const response = await fetch(
+          `${this.base}/poll/${encodeURIComponent(this.room)}/${encodeURIComponent(this.id)}`,
+          { signal: this.pollController.signal, cache: "no-store" },
         );
+        if (response.status === 404) throw new Error("Session expired");
+        if (!response.ok) throw new Error(`Poll failed: HTTP ${response.status}`);
+        const data = (await response.json()) as { messages?: NetMsg[] };
+        failures = 0;
+        for (const message of data.messages ?? []) await this.handleMessage(message);
+      } catch (error) {
+        if (!this.open || (error instanceof DOMException && error.name === "AbortError")) return;
+        failures += 1;
+        if (failures >= 3) {
+          this.joined = false;
+          this.onClose?.();
+          return;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, failures * 500));
       }
-    };
+    }
+  }
 
+  private async handleMessage(message: NetMsg): Promise<void> {
+    if (message.t === "offer") {
+      await this.handleOffer(message.offer as RTCSessionDescriptionInit);
+      return;
+    }
+    if (message.t === "answer") {
+      await this.handleAnswer(message.answer as RTCSessionDescriptionInit);
+      return;
+    }
+    if (message.t === "ice-candidate") {
+      await this.handleIceCandidate(message.candidate as RTCIceCandidateInit);
+      return;
+    }
+    if (message.t === "peer-join") {
+      const peer = {
+        id: String(message.id),
+        name: String(message.name),
+        color: String(message.color),
+      };
+      this.peers = [...this.peers.filter((p) => p.id !== peer.id), peer];
+      this.onPeers?.([...this.peers]);
+    } else if (message.t === "peer-leave") {
+      this.peers = this.peers.filter((p) => p.id !== message.id);
+      this.onPeers?.([...this.peers]);
+    } else if (message.t === "host") {
+      this.youHost = message.id === this.id;
+    }
+    this.onMsg?.(message);
+  }
+
+  private post(message: Record<string, unknown>): Promise<void> {
+    if (!this.open) return Promise.resolve();
+    const task = this.sendChain.then(async () => {
+      const response = await fetch(
+        `${this.base}/send/${encodeURIComponent(this.room)}/${encodeURIComponent(this.id)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(message),
+          keepalive: true,
+        },
+      );
+      if (!response.ok) throw new Error(`Send failed: HTTP ${response.status}`);
+    });
+    this.sendChain = task.catch(() => undefined);
+    return task;
+  }
+
+  async startWebRTC(): Promise<void> {
+    if (this.peers.length !== 1) throw new Error("WebRTC requires exactly 2 players in the room");
+    if (!this.pc) await this.setupWebRTC(true);
+  }
+
+  private async setupWebRTC(createOffer: boolean): Promise<void> {
+    this.pc = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    });
+    this.pc.onicecandidate = (event) => {
+      if (event.candidate) this.send({ t: "ice-candidate", candidate: event.candidate });
+    };
     this.pc.oniceconnectionstatechange = () => {
-      console.log("ICE connection state:", this.pc?.iceConnectionState);
-      if (
-        this.pc?.iceConnectionState === "failed" ||
-        this.pc?.iceConnectionState === "disconnected"
-      ) {
-        console.warn(
-          "WebRTC ICE failed, falling back to WebSocket for game state",
-        );
+      if (this.pc?.iceConnectionState === "failed") {
+        console.warn("WebRTC ICE failed; using HTTP relay fallback");
       }
     };
+    this.pc.ondatachannel = (event) => {
+      this.dataChannel = event.channel;
+      this.setupDataChannelHandlers();
+    };
 
-    if (this.youHost) {
-      // Host creates data channel
+    if (createOffer) {
       this.dataChannel = this.pc.createDataChannel("game");
       this.setupDataChannelHandlers();
-
       const offer = await this.pc.createOffer();
       await this.pc.setLocalDescription(offer);
-
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(
-          JSON.stringify({
-            t: "offer",
-            offer: this.pc.localDescription,
-          }),
-        );
-      }
-    } else {
-      // Guest receives data channel
-      this.pc.ondatachannel = (e) => {
-        this.dataChannel = e.channel;
-        this.setupDataChannelHandlers();
-      };
+      this.send({ t: "offer", offer: this.pc.localDescription });
     }
   }
 
-  private setupDataChannelHandlers() {
+  private setupDataChannelHandlers(): void {
     if (!this.dataChannel) return;
-
     this.dataChannel.onopen = () => {
-      console.log("WebRTC Data Channel Open");
       this.pendingCandidates = [];
     };
-
-    this.dataChannel.onerror = (e) => {
-      console.warn("WebRTC Data Channel error:", e);
-    };
-
-    this.dataChannel.onclose = () => {
-      console.warn("WebRTC Data Channel closed, will fallback to WebSocket");
-    };
-
-    this.dataChannel.onmessage = (e) => {
+    this.dataChannel.onerror = (error) => console.warn("WebRTC DataChannel error", error);
+    this.dataChannel.onmessage = (event) => {
       try {
-        const msg = JSON.parse(e.data);
-        // Forward to onMsg handler
-        this.onMsg?.(msg);
-      } catch (err) {
-        console.error("Failed to parse data channel message", err);
+        this.onMsg?.(JSON.parse(String(event.data)) as NetMsg);
+      } catch {
+        console.warn("Ignored invalid WebRTC message");
       }
     };
   }
 
-  private async handleOffer(offer: RTCSessionDescriptionInit) {
-    if (!this.pc) return;
-    await this.pc.setRemoteDescription(new RTCSessionDescription(offer));
-    const answer = await this.pc.createAnswer();
-    await this.pc.setLocalDescription(answer);
-
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(
-        JSON.stringify({
-          t: "answer",
-          answer: this.pc.localDescription,
-        }),
-      );
-    }
+  private async handleOffer(offer: RTCSessionDescriptionInit): Promise<void> {
+    if (!this.pc) await this.setupWebRTC(false);
+    await this.pc!.setRemoteDescription(offer);
+    const answer = await this.pc!.createAnswer();
+    await this.pc!.setLocalDescription(answer);
+    this.send({ t: "answer", answer: this.pc!.localDescription });
+    await this.flushCandidates();
   }
 
-  private async handleAnswer(answer: RTCSessionDescriptionInit) {
+  private async handleAnswer(answer: RTCSessionDescriptionInit): Promise<void> {
     if (!this.pc) return;
-    await this.pc.setRemoteDescription(new RTCSessionDescription(answer));
-
-    // Add pending candidates
-    for (const candidate of this.pendingCandidates) {
-      await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
-    }
+    await this.pc.setRemoteDescription(answer);
+    await this.flushCandidates();
   }
 
-  private async handleIceCandidate(candidate: RTCIceCandidateInit) {
-    if (!this.pc) return;
-
-    if (this.pc.remoteDescription) {
-      await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
-    } else {
+  private async handleIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
+    if (!this.pc || !this.pc.remoteDescription) {
       this.pendingCandidates.push(candidate);
+      return;
+    }
+    await this.pc.addIceCandidate(candidate);
+  }
+
+  private async flushCandidates(): Promise<void> {
+    if (!this.pc?.remoteDescription) return;
+    for (const candidate of this.pendingCandidates.splice(0)) {
+      await this.pc.addIceCandidate(candidate);
     }
   }
 
-  // Send game state via WebRTC (Host only)
-  broadcastState(state: Record<string, unknown>) {
-    if (this.dataChannel && this.dataChannel.readyState === "open") {
+  broadcastState(state: Record<string, unknown>): void {
+    if (this.dataChannel?.readyState === "open") {
       this.dataChannel.send(JSON.stringify(state));
-    } else if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      // Fallback to WebSocket if data channel is not available
-      this.ws.send(JSON.stringify(state));
+    } else {
+      this.send(state);
     }
   }
 
-  // --- End WebRTC Methods ---
-
-  send(m: Record<string, unknown>) {
-    if (this.open) {
-      try {
-        this.ws!.send(JSON.stringify(m));
-      } catch {
-        /* ignore */
-      }
-    }
+  send(message: Record<string, unknown>): void {
+    void this.post(message).catch(() => undefined);
   }
 
-  close() {
+  close(): void {
+    if (this.closedByMe) return;
+    const leaveUrl = this.id
+      ? `${this.base}/leave/${encodeURIComponent(this.room)}/${encodeURIComponent(this.id)}`
+      : "";
     this.closedByMe = true;
-    if (this.dataChannel) {
-      try {
-        this.dataChannel.close();
-      } catch {}
-      this.dataChannel = null;
-    }
-    if (this.pc) {
-      try {
-        this.pc.close();
-      } catch {}
-      this.pc = null;
-    }
-    if (this.ws) {
-      try {
-        this.ws.close();
-      } catch {
-        /* ignore */
+    this.joined = false;
+    this.pollController?.abort();
+    this.pollController = null;
+    this.dataChannel?.close();
+    this.dataChannel = null;
+    this.pc?.close();
+    this.pc = null;
+    if (leaveUrl) {
+      if (!navigator.sendBeacon(leaveUrl, new Blob([], { type: "application/json" }))) {
+        void fetch(leaveUrl, { method: "POST", keepalive: true }).catch(() => undefined);
       }
     }
-    this.ws = null;
   }
 }
