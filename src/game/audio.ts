@@ -1,6 +1,6 @@
 /* Hệ thống âm thanh: nhạc nền + hiệu ứng tổng hợp WebAudio. */
 
-/** Bundled BGM — served from public/music/ via Vite (and prod static host). */
+/** Optional local BGM (public/music/pixel-rush.mp3). Falls back to chiptune if missing. */
 const LOCAL_SRC = "/music/pixel-rush.mp3";
 
 export type BgmSource = "local" | "synth" | "none";
