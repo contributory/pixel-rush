@@ -1525,14 +1525,14 @@ export class Engine {
   private persistProfile() {
     if (this.role !== "solo") return;
     const prev = loadPlayerProfile();
+    // Current loadout is source of truth (death can strip a weapon).
     const weapons = this.me?.weapons?.length ? [...this.me.weapons] : ["pulse"];
-    // Merge unlocks so we never lose a weapon the pilot already owned.
-    const merged = new Set<WeaponType>(["pulse", ...prev.weapons, ...weapons]);
+    if (!weapons.includes("pulse")) weapons.unshift("pulse");
     savePlayerProfile({
       score: Math.max(prev.score, this.score),
       wave: Math.max(prev.wave, this.wave, 1),
-      weapons: WEAPON_TYPES.filter((w) => merged.has(w)),
-      bombs: Math.max(prev.bombs, this.me?.bombs ?? 3),
+      weapons: WEAPON_TYPES.filter((w) => weapons.includes(w)),
+      bombs: Math.max(0, Math.min(9, this.me?.bombs ?? prev.bombs)),
       kills: Math.max(prev.kills, this.kills),
       bestCombo: Math.max(prev.bestCombo, this.bestCombo),
     });
@@ -1695,6 +1695,18 @@ export class Engine {
     audio.playerDead();
     this.shake = Math.min(30, this.shake + 16);
     this.flashRed = 0.55;
+
+    // On death: randomly lose one non-pulse weapon (arsenal shrinks for good on solo).
+    const droppable = me.weapons.filter((w) => w !== "pulse");
+    if (droppable.length > 0) {
+      const lost = droppable[Math.floor(Math.random() * droppable.length)];
+      me.weapons = me.weapons.filter((w) => w !== lost);
+      if (!me.weapons.includes("pulse")) me.weapons = ["pulse", ...me.weapons];
+      if (!me.weapons.length) me.weapons = ["pulse"];
+      this.pop(me.x, me.y - 42, `${WEAPON_LABEL[lost] ?? lost} LOST`, "#ff2d78", true);
+      if (this.role === "solo") this.persistProfile();
+    }
+
     if (me.lives > 0) {
       me.lives--;
       me.alive = false;
@@ -1704,7 +1716,12 @@ export class Engine {
       me.respawn = Infinity;
     }
     if (this.net?.open) {
-      this.net.send({ t: "pdmg", lives: me.lives, dead: !me.alive && !Number.isFinite(me.respawn) });
+      this.net.send({
+        t: "pdmg",
+        lives: me.lives,
+        dead: !me.alive && !Number.isFinite(me.respawn),
+        weapons: [...me.weapons],
+      });
     }
     if (this.role !== "guest") this.checkGameOver();
   }
