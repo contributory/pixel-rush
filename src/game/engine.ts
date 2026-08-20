@@ -9,7 +9,7 @@ import { audio } from "./audio";
 import { NetClient, normalizeHttpOrigin, type NetMsg, type PeerInfo } from "./net";
 import type {
   Phase, Role, OverStats, HudPlayer, HudData, NetInfo, EngineCallbacks,
-  Bullet, EnemyType, Enemy, WeaponType, Pickup, Particle, Pop, ShipState, SpawnEntry,
+  Bullet, EnemyType, Enemy, WeaponType, PickType, Pickup, Particle, Pop, ShipState, SpawnEntry,
   PlayerProfile, RunProgress
 } from "./types";
 import {
@@ -32,7 +32,7 @@ export function loadPlayerProfile(): PlayerProfile {
     const raw = localStorage.getItem(PROFILE_KEY) ?? localStorage.getItem("pixelrush-progress");
     if (!raw) return DEFAULT_PROFILE();
     const o = JSON.parse(raw) as Partial<PlayerProfile>;
-    const weapons = Array.isArray(o.weapons)
+    const weapons: WeaponType[] = Array.isArray(o.weapons)
       ? o.weapons.map(String).filter((w): w is WeaponType => WEAPON_TYPES.includes(w as WeaponType))
       : ["pulse"];
     if (!weapons.includes("pulse")) weapons.unshift("pulse");

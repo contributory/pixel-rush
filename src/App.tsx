@@ -2,12 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import {
   Engine,
   loadPlayerProfile,
-  type HudData,
-  type NetInfo,
-  type OverStats,
-  type Phase,
-  type PlayerProfile,
 } from "./game/engine";
+import type { HudData, NetInfo, OverStats, Phase, PlayerProfile } from "./game/types";
 import { audio, type BgmSource } from "./game/audio";
 import { defaultWsUrl, fetchRooms, normalizeWsOrigin, type RoomInfo } from "./game/net";
 

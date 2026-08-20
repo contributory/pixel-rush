@@ -3,6 +3,8 @@
    Type definitions and interfaces for the game engine
    ============================================================ */
 
+import type { PeerInfo } from "./net";
+
 export type Phase = "menu" | "connecting" | "playing" | "paused" | "gameover";
 export type Role = "solo" | "host" | "guest";
 
@@ -78,7 +80,7 @@ export interface Enemy {
 
 export type WeaponType = "pulse" | "spread" | "laser" | "missile" | "sidewinder" | "plasma" | "burst" | "orbit" | "rail" | "nova";
 
-type PickType = WeaponType | "B" | "H";
+export type PickType = WeaponType | "B" | "H";
 
 export interface Pickup {
   id: number; type: PickType; x: number; y: number; t: number;
