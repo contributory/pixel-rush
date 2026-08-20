@@ -78,13 +78,18 @@ const ENEMY_COLORS: Record<string, string> = {
   spinner: "#7dff5e",
   tank: "#b45cff",
   boss: "#ff2d78",
-  // new enemies
+  hydra: "#ff006e",
+  prism: "#00f5d4",
+  serpent: "#fee440",
+  fortress: "#8338ec",
   wraith: "#00ffff",
   bomber: "#ff6b35",
   splitter: "#9d4edd",
   hunter: "#ff006e",
   sentinel: "#3a86ff",
   miniboss: "#8338ec",
+  raider: "#fb5607",
+  mortar: "#3a86ff",
 };
 const ENEMY_SCORE: Record<string, number> = {
   drone: 100,
@@ -92,13 +97,18 @@ const ENEMY_SCORE: Record<string, number> = {
   spinner: 250,
   tank: 300,
   boss: 5000,
-  // new enemies
+  hydra: 5500,
+  prism: 5200,
+  serpent: 5400,
+  fortress: 6000,
   wraith: 180,
   bomber: 350,
   splitter: 400,
   hunter: 280,
   sentinel: 450,
   miniboss: 2500,
+  raider: 2800,
+  mortar: 2700,
 };
 const ENEMY_R: Record<string, number> = {
   drone: 13,
@@ -106,14 +116,31 @@ const ENEMY_R: Record<string, number> = {
   spinner: 15,
   tank: 20,
   boss: 48,
-  // new enemies
+  hydra: 50,
+  prism: 46,
+  serpent: 44,
+  fortress: 56,
   wraith: 12,
   bomber: 18,
   splitter: 16,
   hunter: 14,
   sentinel: 22,
   miniboss: 35,
+  raider: 34,
+  mortar: 36,
 };
+
+/** Full-size boss roster (wave multiples of 10). */
+const BOSS_TYPES = ["boss", "hydra", "prism", "serpent", "fortress"] as const;
+/** Mid-tier bosses (wave multiples of 5, not 10). */
+const MINIBOSS_TYPES = ["miniboss", "raider", "mortar"] as const;
+
+function isBossKind(t: string): boolean {
+  return (BOSS_TYPES as readonly string[]).includes(t);
+}
+function isMinibossKind(t: string): boolean {
+  return (MINIBOSS_TYPES as readonly string[]).includes(t);
+}
 
 /* ---------------- entity types ---------------- */
 interface Bullet {
@@ -121,7 +148,7 @@ interface Bullet {
   dmg: number; r: number; from: "p" | "e"; color: string;
   homing?: boolean; dead?: boolean;
 }
-type EnemyType = "drone" | "dart" | "spinner" | "tank" | "boss" | "wraith" | "bomber" | "splitter" | "hunter" | "sentinel" | "miniboss";
+type EnemyType = "drone" | "dart" | "spinner" | "tank" | "boss" | "hydra" | "prism" | "serpent" | "fortress" | "wraith" | "bomber" | "splitter" | "hunter" | "sentinel" | "miniboss" | "raider" | "mortar";
 interface Enemy {
   id: number; type: EnemyType;
   x: number; y: number;
@@ -604,7 +631,7 @@ export class Engine {
   }
 
   getHud(): HudData {
-    const boss = this.enemies.find((e) => e.type === "boss");
+    const boss = this.enemies.find((e) => isBossKind(e.type) || isMinibossKind(e.type));
     return {
       phase: this.phase,
       role: this.role,
@@ -748,125 +775,135 @@ export class Engine {
   private buildWave(w: number): SpawnEntry[] {
     const q: SpawnEntry[] = [];
     const xAt = (f: number) => clamp(this.W * f, 50, this.W - 50);
-    
-    // Boss waves every 10 waves, miniboss every 5 but not 10
+
+    // Full bosses every 10 waves — cycle variants for variety
     if (w % 10 === 0) {
-      q.push({ at: 1.2, type: "boss", x: this.W / 2, phase: 0 });
+      const kind = BOSS_TYPES[Math.floor(w / 10) % BOSS_TYPES.length];
+      q.push({ at: 1.2, type: kind, x: this.W / 2, phase: 0 });
+      // escort pack so the arena is never empty
+      for (let i = 0; i < 4 + Math.min(6, Math.floor(w / 10)); i++) {
+        q.push({ at: 2.0 + i * 0.55, type: "drone", x: xAt(rand(0.12, 0.88)), phase: rand(0, TAU) });
+      }
       return q;
     }
+    // Minibosses every 5 waves (not 10)
     if (w % 5 === 0) {
-      q.push({ at: 1.2, type: "miniboss", x: this.W / 2, phase: 0 });
+      const kind = MINIBOSS_TYPES[Math.floor(w / 5) % MINIBOSS_TYPES.length];
+      q.push({ at: 1.2, type: kind, x: this.W / 2, phase: 0 });
+      for (let i = 0; i < 3 + Math.min(4, Math.floor(w / 5)); i++) {
+        q.push({ at: 1.8 + i * 0.45, type: "dart", x: xAt(rand(0.15, 0.85)), phase: rand(0, TAU) });
+      }
       return q;
     }
-    
+
     let t = 0.4;
-    // hàng drone bay lượn
-    const drones = 4 + Math.min(10, Math.floor(w * 1.2));
+    // denser drone waves
+    const drones = 6 + Math.min(16, Math.floor(w * 1.55));
     for (let i = 0; i < drones; i++) {
       q.push({ at: t, type: "drone", x: xAt(rand(0.12, 0.88)), phase: rand(0, TAU) });
-      t += rand(0.22, 0.4);
+      t += rand(0.16, 0.32);
     }
-    
-    // darts xuất hiện từ wave 2
+
     if (w >= 2) {
-      t += 0.6;
-      const darts = 3 + Math.min(4, w - 1);
+      t += 0.45;
+      const darts = 4 + Math.min(7, w);
       for (let i = 0; i < darts; i++) {
         q.push({ at: t, type: "dart", x: xAt(rand(0.15, 0.85)), phase: rand(0, TAU) });
-        t += rand(0.4, 0.6);
+        t += rand(0.28, 0.48);
       }
     }
-    
-    // spinners xuất hiện từ wave 3
+
     if (w >= 3) {
-      q.push({ at: t + 0.4, type: "spinner", x: xAt(0.22), phase: 0 });
-      q.push({ at: t + 0.9, type: "spinner", x: xAt(0.78), phase: Math.PI });
-      t += 1.6;
+      const spins = 2 + Math.min(2, Math.floor(w / 5));
+      for (let i = 0; i < spins; i++) {
+        q.push({ at: t + 0.3 + i * 0.45, type: "spinner", x: xAt(0.2 + i * 0.2), phase: i * Math.PI });
+      }
+      t += 1.2 + spins * 0.4;
     }
-    
-    // tanks xuất hiện từ wave 4
+
     if (w >= 4) {
-      const tanks = 1 + Math.min(2, Math.floor((w - 4) / 2));
+      const tanks = 2 + Math.min(3, Math.floor((w - 4) / 2));
       for (let i = 0; i < tanks; i++) {
-        q.push({ at: t + i * 1.4, type: "tank", x: xAt(rand(0.3, 0.7)), phase: rand(0, TAU) });
+        q.push({ at: t + i * 1.1, type: "tank", x: xAt(rand(0.25, 0.75)), phase: rand(0, TAU) });
       }
-      t += tanks * 1.4;
+      t += tanks * 1.1;
     }
-    
-    // wraiths - kẻ thù tàng hình, xuất hiện từ wave 5
+
     if (w >= 5) {
-      const wraiths = 2 + Math.min(4, Math.floor((w - 5) / 2));
+      const wraiths = 3 + Math.min(6, Math.floor((w - 5) / 2));
       for (let i = 0; i < wraiths; i++) {
-        q.push({ at: t + 0.3 + i * 0.5, type: "wraith", x: xAt(rand(0.1, 0.9)), phase: rand(0, TAU) });
+        q.push({ at: t + 0.25 + i * 0.4, type: "wraith", x: xAt(rand(0.1, 0.9)), phase: rand(0, TAU) });
       }
-      t += 0.5 + wraiths * 0.5;
+      t += 0.4 + wraiths * 0.4;
     }
-    
-    // bombers - kẻ thù ném bom, xuất hiện từ wave 6
+
     if (w >= 6) {
-      const bombers = 1 + Math.min(2, Math.floor((w - 6) / 3));
+      const bombers = 2 + Math.min(3, Math.floor((w - 6) / 2));
       for (let i = 0; i < bombers; i++) {
-        q.push({ at: t + 0.4 + i * 1.2, type: "bomber", x: xAt(rand(0.2, 0.8)), phase: rand(0, TAU) });
+        q.push({ at: t + 0.35 + i * 1.0, type: "bomber", x: xAt(rand(0.2, 0.8)), phase: rand(0, TAU) });
       }
-      t += 0.6 + bombers * 1.2;
+      t += 0.5 + bombers * 1.0;
     }
-    
-    // splitters - kẻ thù phân chia, xuất hiện từ wave 7
+
     if (w >= 7) {
-      q.push({ at: t + 0.5, type: "splitter", x: xAt(0.35), phase: 0 });
-      q.push({ at: t + 1.0, type: "splitter", x: xAt(0.65), phase: Math.PI });
-      t += 1.8;
+      const splits = 2 + Math.min(2, Math.floor(w / 8));
+      for (let i = 0; i < splits; i++) {
+        q.push({ at: t + 0.4 + i * 0.55, type: "splitter", x: xAt(0.3 + i * 0.2), phase: i * Math.PI });
+      }
+      t += 1.4 + splits * 0.4;
     }
-    
-    // hunters - kẻ thù truy đuổi, xuất hiện từ wave 8
+
     if (w >= 8) {
-      const hunters = 2 + Math.min(3, Math.floor((w - 8) / 2));
+      const hunters = 3 + Math.min(5, Math.floor((w - 8) / 2));
       for (let i = 0; i < hunters; i++) {
-        q.push({ at: t + 0.3 + i * 0.7, type: "hunter", x: xAt(rand(0.15, 0.85)), phase: rand(0, TAU) });
+        q.push({ at: t + 0.25 + i * 0.55, type: "hunter", x: xAt(rand(0.15, 0.85)), phase: rand(0, TAU) });
       }
-      t += 0.5 + hunters * 0.7;
+      t += 0.4 + hunters * 0.55;
     }
-    
-    // sentinels - kẻ thù bảo vệ, xuất hiện từ wave 9
+
     if (w >= 9) {
-      const sentinels = 1 + Math.min(2, Math.floor((w - 9) / 3));
+      const sentinels = 2 + Math.min(3, Math.floor((w - 9) / 3));
       for (let i = 0; i < sentinels; i++) {
-        q.push({ at: t + 0.6 + i * 1.5, type: "sentinel", x: xAt(rand(0.25, 0.75)), phase: rand(0, TAU) });
+        q.push({ at: t + 0.5 + i * 1.2, type: "sentinel", x: xAt(rand(0.25, 0.75)), phase: rand(0, TAU) });
       }
-      t += 0.8 + sentinels * 1.5;
+      t += 0.7 + sentinels * 1.2;
     }
-    
-    // thêm drone phụ ở cuối wave
+
+    // closing rush
     if (w >= 3) {
-      for (let i = 0; i < 3; i++) {
-        q.push({ at: t + 0.5 + i * 0.3, type: "drone", x: xAt(rand(0.12, 0.88)), phase: rand(0, TAU) });
+      const fin = 4 + Math.min(6, Math.floor(w / 3));
+      for (let i = 0; i < fin; i++) {
+        q.push({ at: t + 0.35 + i * 0.22, type: "drone", x: xAt(rand(0.12, 0.88)), phase: rand(0, TAU) });
       }
     }
-    
+
     return q;
   }
 
   private spawnEnemy(type: EnemyType, x: number, phase: number) {
     const w = this.wave;
     // Độ khó tăng dần: dễ hơn ở đầu, scale mạnh hơn từ wave 10+
+    // Harder curve: ramps earlier and keeps climbing
     const difficultyMultiplier =
-      w <= 3 ? 0.55 :
-      w <= 6 ? 0.7 :
-      w <= 10 ? 0.85 :
-      w <= 15 ? 1.0 :
-      1.0 + (w - 15) * 0.06;
+      w <= 2 ? 0.85 :
+      w <= 5 ? 1.05 :
+      w <= 10 ? 1.25 :
+      w <= 15 ? 1.45 :
+      1.55 + (w - 15) * 0.09;
+    const coop = this.players.size > 1 ? 1.55 : 1;
     const hp =
-      type === "drone" ? Math.max(1, Math.floor(1 * difficultyMultiplier)) :
-      type === "dart" ? Math.max(1, Math.floor(1 * difficultyMultiplier)) :
-      type === "spinner" ? Math.max(2, Math.floor((3 + Math.floor(w / 3)) * difficultyMultiplier)) :
-      type === "tank" ? Math.max(4, Math.floor((6 + Math.floor(w / 2)) * difficultyMultiplier)) :
-      type === "wraith" ? Math.max(2, Math.floor((2 + Math.floor(w / 4)) * difficultyMultiplier)) :
-      type === "bomber" ? Math.max(6, Math.floor((8 + Math.floor(w / 2)) * difficultyMultiplier)) :
-      type === "splitter" ? Math.max(4, Math.floor((5 + Math.floor(w / 3)) * difficultyMultiplier)) :
-      type === "hunter" ? Math.max(2, Math.floor((3 + Math.floor(w / 4)) * difficultyMultiplier)) :
-      type === "sentinel" ? Math.max(8, Math.floor((12 + Math.floor(w / 2)) * difficultyMultiplier)) :
-      type === "miniboss" ? Math.floor((60 + w * 18) * (this.players.size > 1 ? 1.5 : 1) * 0.9) :
-      Math.floor((100 + w * 25) * (this.players.size > 1 ? 1.5 : 1) * 0.85);
+      type === "drone" ? Math.max(1, Math.floor(2 * difficultyMultiplier)) :
+      type === "dart" ? Math.max(1, Math.floor(2 * difficultyMultiplier)) :
+      type === "spinner" ? Math.max(3, Math.floor((5 + Math.floor(w / 2)) * difficultyMultiplier)) :
+      type === "tank" ? Math.max(6, Math.floor((10 + Math.floor(w / 1.5)) * difficultyMultiplier)) :
+      type === "wraith" ? Math.max(3, Math.floor((4 + Math.floor(w / 3)) * difficultyMultiplier)) :
+      type === "bomber" ? Math.max(8, Math.floor((12 + Math.floor(w / 2)) * difficultyMultiplier)) :
+      type === "splitter" ? Math.max(6, Math.floor((8 + Math.floor(w / 2)) * difficultyMultiplier)) :
+      type === "hunter" ? Math.max(3, Math.floor((5 + Math.floor(w / 3)) * difficultyMultiplier)) :
+      type === "sentinel" ? Math.max(12, Math.floor((18 + Math.floor(w / 1.5)) * difficultyMultiplier)) :
+      isMinibossKind(type) ? Math.floor((95 + w * 28) * coop * difficultyMultiplier) :
+      isBossKind(type) ? Math.floor((160 + w * 38) * coop * difficultyMultiplier) :
+      Math.max(2, Math.floor(3 * difficultyMultiplier));
     const e: Enemy = {
       id: this.idc++, type,
       x, y: -40,
@@ -1100,7 +1137,7 @@ export class Engine {
       if (!seen.has(en.id)) {
         // chỉ nổ khi địch còn trong màn hình (tránh nổ "ma" khi địch bay ra ngoài)
         if (en.ty < this.H - 10 && en.ty > -20 && en.tx > -30 && en.tx < this.W + 30) {
-          this.explode(en.x, en.y, ENEMY_COLORS[en.type] ?? "#ff4d8f", en.type === "boss" ? 3 : 1);
+          this.explode(en.x, en.y, ENEMY_COLORS[en.type] ?? "#ff4d8f", isBossKind(en.type) ? 3 : isMinibossKind(en.type) ? 2 : 1);
         }
         en.dead = true;
       }
@@ -1302,11 +1339,12 @@ export class Engine {
       this.spawnQueue = this.spawnQueue.filter((s) => s.at !== Infinity);
 
       // boss wave: rỉ rả thêm drone
-      if (this.wave % 5 === 0 && this.enemies.some((e) => e.type === "boss")) {
+      if (this.wave % 5 === 0 && this.enemies.some((e) => isBossKind(e.type) || isMinibossKind(e.type))) {
         this.bossTrickleT -= dt;
-        if (this.bossTrickleT <= 0 && this.enemies.length < 7) {
-          this.bossTrickleT = 3.2;
-          this.spawnEnemy("drone", rand(60, this.W - 60), rand(0, TAU));
+        if (this.bossTrickleT <= 0 && this.enemies.length < 10) {
+          this.bossTrickleT = 2.2;
+          const fodder: EnemyType = Math.random() < 0.5 ? "drone" : "dart";
+          this.spawnEnemy(fodder, rand(60, this.W - 60), rand(0, TAU));
         }
       }
 
@@ -1766,21 +1804,19 @@ export class Engine {
       }
       case "boss": {
         if (e.y < 150) {
-          e.y += 90 * dt;
+          e.y += 100 * dt;
         } else {
-          e.x = this.W / 2 + Math.sin(e.t * 0.5) * Math.max(80, this.W / 2 - 150);
-          const enraged = e.hp < e.maxHp * 0.5;
-          // Giảm độ khó boss: tốc độ bắn chậm hơn và số đạn ít hơn ở wave đầu
-          const difficultyFactor = this.wave <= 10 ? 1.3 : 1.0;
-          const k = (enraged ? 0.7 : 1) * difficultyFactor;
+          e.x = this.W / 2 + Math.sin(e.t * 0.55) * Math.max(80, this.W / 2 - 150);
+          const enraged = e.hp < e.maxHp * 0.45;
+          const k = enraged ? 0.65 : 1;
           e.shootT -= dt;
           if (e.shootT <= 0) {
-            e.shootT = 2.8 * k; // tăng thời gian giữa các lần bắn từ 2.3 lên 2.8
-            const n = 10 + Math.min(6, w); // giảm số đạn từ 14+ xuống 10+
+            e.shootT = 1.9 * k;
+            const n = 14 + Math.min(10, Math.floor(w / 2));
             const off = rand(0, TAU);
             for (let i = 0; i < n; i++) {
               const a = off + (i / n) * TAU;
-              const sp = Math.min(240, 150 + w * 4); // giảm tốc độ đạn
+              const sp = Math.min(300, 180 + w * 5);
               const b: Bullet = {
                 x: e.x, y: e.y + 10, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
                 dmg: 1, r: 6, from: "e", color: "#ffd23f",
@@ -1791,14 +1827,13 @@ export class Engine {
             audio.eshoot();
           }
           e.phase += dt;
-          if (e.phase > 1.8 * k) { // tăng thời gian giữa các đợt bắn phụ
+          if (e.phase > 1.15 * k) {
             e.phase = 0;
             const p = this.nearestPlayer(e.x, e.y);
             if (p) {
-              for (let i = -2; i <= 2; i++) {
-                const d = Math.hypot(p.x - e.x, p.y - e.y) || 1;
-                const sp = Math.min(280, 200 + w * 5); // giảm tốc độ đạn phụ
-                const base = Math.atan2(p.y - e.y, p.x - e.x) + i * 0.16;
+              for (let i = -3; i <= 3; i++) {
+                const sp = Math.min(320, 220 + w * 6);
+                const base = Math.atan2(p.y - e.y, p.x - e.x) + i * 0.14;
                 const b: Bullet = {
                   x: e.x, y: e.y + 16, vx: Math.cos(base) * sp, vy: Math.sin(base) * sp,
                   dmg: 1, r: 5, from: "e", color: "#ff5c8a",
@@ -1807,6 +1842,150 @@ export class Engine {
                 if (this.net?.open) this.net.send({ t: "eshot", x: b.x, y: b.y, vx: b.vx, vy: b.vy, r: 5, color: "#ff5c8a" });
               }
               audio.eshoot();
+            }
+          }
+        }
+        break;
+      }
+      case "hydra": {
+        // Twin-core boss — dual side cannons + ring fire
+        if (e.y < 140) e.y += 95 * dt;
+        else {
+          e.x = this.W / 2 + Math.sin(e.t * 0.7) * Math.max(60, this.W / 2 - 160);
+          const enraged = e.hp < e.maxHp * 0.4;
+          e.shootT -= dt;
+          if (e.shootT <= 0) {
+            e.shootT = enraged ? 0.9 : 1.35;
+            for (const side of [-1, 1] as const) {
+              const ox = e.x + side * 36;
+              const p = this.nearestPlayer(ox, e.y);
+              const base = p ? Math.atan2(p.y - e.y, p.x - ox) : Math.PI / 2;
+              for (let i = -2; i <= 2; i++) {
+                const a = base + i * 0.11;
+                const sp = Math.min(310, 210 + w * 6);
+                const b: Bullet = {
+                  x: ox, y: e.y + 12, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+                  dmg: 1, r: 5, from: "e", color: ENEMY_COLORS.hydra,
+                };
+                this.bullets.push(b);
+                if (this.net?.open) this.net.send({ t: "eshot", x: b.x, y: b.y, vx: b.vx, vy: b.vy, r: 5, color: ENEMY_COLORS.hydra });
+              }
+            }
+            audio.eshoot();
+          }
+          e.phase += dt;
+          if (e.phase > (enraged ? 1.4 : 2.0)) {
+            e.phase = 0;
+            const n = 12 + Math.min(8, Math.floor(w / 2));
+            const off = e.t;
+            for (let i = 0; i < n; i++) {
+              const a = off + (i / n) * TAU;
+              const sp = Math.min(280, 160 + w * 5);
+              const b: Bullet = {
+                x: e.x, y: e.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+                dmg: 1, r: 5, from: "e", color: "#ff9d2e",
+              };
+              this.bullets.push(b);
+              if (this.net?.open) this.net.send({ t: "eshot", x: b.x, y: b.y, vx: b.vx, vy: b.vy, r: 5, color: "#ff9d2e" });
+            }
+            audio.eshoot();
+          }
+        }
+        break;
+      }
+      case "prism": {
+        // Prism — rapid aimed lasers in rotating fan
+        if (e.y < 130) e.y += 110 * dt;
+        else {
+          e.x = this.W / 2 + Math.sin(e.t * 0.9) * Math.max(40, this.W / 2 - 200);
+          e.shootT -= dt;
+          if (e.shootT <= 0) {
+            e.shootT = e.hp < e.maxHp * 0.35 ? 0.18 : 0.32;
+            const p = this.nearestPlayer(e.x, e.y);
+            const base = p ? Math.atan2(p.y - e.y, p.x - e.x) : Math.PI / 2;
+            const fan = 3 + Math.min(4, Math.floor(w / 4));
+            for (let i = -fan; i <= fan; i++) {
+              const a = base + i * 0.08 + Math.sin(e.t * 4) * 0.15;
+              const sp = Math.min(360, 240 + w * 7);
+              const b: Bullet = {
+                x: e.x, y: e.y + 8, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+                dmg: 1, r: 3.5, from: "e", color: ENEMY_COLORS.prism,
+              };
+              this.bullets.push(b);
+              if (this.net?.open) this.net.send({ t: "eshot", x: b.x, y: b.y, vx: b.vx, vy: b.vy, r: 3.5, color: ENEMY_COLORS.prism });
+            }
+            audio.eshoot();
+          }
+        }
+        break;
+      }
+      case "serpent": {
+        // Serpent — sweeps left/right, sprays arcs
+        if (e.y < 120) e.y += 100 * dt;
+        else {
+          e.x = this.W / 2 + Math.sin(e.t * 1.15) * Math.max(120, this.W / 2 - 90);
+          e.y = 120 + Math.sin(e.t * 2.2) * 28;
+          e.shootT -= dt;
+          if (e.shootT <= 0) {
+            e.shootT = 0.55;
+            const dir = Math.sin(e.t * 1.15) >= 0 ? 1 : -1;
+            for (let i = 0; i < 7; i++) {
+              const a = Math.PI / 2 + dir * (0.15 + i * 0.12);
+              const sp = Math.min(300, 190 + w * 5);
+              const b: Bullet = {
+                x: e.x, y: e.y + 10, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+                dmg: 1, r: 5, from: "e", color: ENEMY_COLORS.serpent,
+              };
+              this.bullets.push(b);
+              if (this.net?.open) this.net.send({ t: "eshot", x: b.x, y: b.y, vx: b.vx, vy: b.vy, r: 5, color: ENEMY_COLORS.serpent });
+            }
+            audio.eshoot();
+          }
+        }
+        break;
+      }
+      case "fortress": {
+        // Fortress — slow, armored, spawns drones + heavy volleys
+        if (e.y < 160) e.y += 70 * dt;
+        else {
+          e.x = this.W / 2 + Math.sin(e.t * 0.25) * 50;
+          e.shootT -= dt;
+          if (e.shootT <= 0) {
+            e.shootT = 2.1;
+            const n = 16 + Math.min(12, Math.floor(w / 2));
+            const off = e.t * 0.5;
+            for (let i = 0; i < n; i++) {
+              const a = off + (i / n) * TAU;
+              const sp = Math.min(260, 140 + w * 4);
+              const b: Bullet = {
+                x: e.x, y: e.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+                dmg: 1, r: 7, from: "e", color: ENEMY_COLORS.fortress,
+              };
+              this.bullets.push(b);
+              if (this.net?.open) this.net.send({ t: "eshot", x: b.x, y: b.y, vx: b.vx, vy: b.vy, r: 7, color: ENEMY_COLORS.fortress });
+            }
+            // summon escorts
+            if (this.enemies.length < 12) {
+              this.spawnEnemy("drone", clamp(e.x - 80, 40, this.W - 40), 0);
+              this.spawnEnemy("drone", clamp(e.x + 80, 40, this.W - 40), Math.PI);
+            }
+            audio.eshoot();
+          }
+          e.phase += dt;
+          if (e.phase > 1.0) {
+            e.phase = 0;
+            const p = this.nearestPlayer(e.x, e.y);
+            if (p) {
+              for (let i = -1; i <= 1; i++) {
+                const a = Math.atan2(p.y - e.y, p.x - e.x) + i * 0.08;
+                const sp = Math.min(340, 230 + w * 6);
+                const b: Bullet = {
+                  x: e.x, y: e.y + 18, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+                  dmg: 1, r: 8, from: "e", color: "#ffd23f",
+                };
+                this.bullets.push(b);
+                if (this.net?.open) this.net.send({ t: "eshot", x: b.x, y: b.y, vx: b.vx, vy: b.vy, r: 8, color: "#ffd23f" });
+              }
             }
           }
         }
@@ -1957,20 +2136,17 @@ export class Engine {
         break;
       }
       case "miniboss": {
-        // miniboss - boss nhỏ xuất hiện ở wave 5, 15, 25...
-        if (e.y < 130) {
-          e.y += 70 * dt;
-        } else {
-          e.x = this.W / 2 + Math.sin(e.t * 0.4) * Math.max(100, this.W / 2 - 180);
+        if (e.y < 130) e.y += 80 * dt;
+        else {
+          e.x = this.W / 2 + Math.sin(e.t * 0.45) * Math.max(100, this.W / 2 - 180);
           e.shootT -= dt;
           if (e.shootT <= 0) {
-            e.shootT = 1.5;
-            // bắn vòng tròn
-            const n = 10 + Math.min(6, w);
+            e.shootT = 1.15;
+            const n = 12 + Math.min(8, Math.floor(w / 2));
             const off = rand(0, TAU);
             for (let i = 0; i < n; i++) {
               const a = off + (i / n) * TAU;
-              const sp = Math.min(220, 150 + w * 4);
+              const sp = Math.min(260, 170 + w * 5);
               const b: Bullet = {
                 x: e.x, y: e.y + 8, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
                 dmg: 1, r: 5, from: "e", color: ENEMY_COLORS.miniboss,
@@ -1981,15 +2157,13 @@ export class Engine {
             audio.eshoot();
           }
           e.phase += dt;
-          if (e.phase > 1.2) {
+          if (e.phase > 0.95) {
             e.phase = 0;
-            // bắn chùm nhắm vào người chơi
             const p = this.nearestPlayer(e.x, e.y);
             if (p) {
-              for (let i = -1; i <= 1; i++) {
-                const d = Math.hypot(p.x - e.x, p.y - e.y) || 1;
-                const sp = Math.min(280, 200 + w * 5);
-                const base = Math.atan2(p.y - e.y, p.x - e.x) + i * 0.12;
+              for (let i = -2; i <= 2; i++) {
+                const sp = Math.min(300, 210 + w * 5);
+                const base = Math.atan2(p.y - e.y, p.x - e.x) + i * 0.11;
                 const b: Bullet = {
                   x: e.x, y: e.y + 12, vx: Math.cos(base) * sp, vy: Math.sin(base) * sp,
                   dmg: 1, r: 6, from: "e", color: "#ff6b35",
@@ -1999,6 +2173,64 @@ export class Engine {
               }
               audio.eshoot();
             }
+          }
+        }
+        break;
+      }
+      case "raider": {
+        // Aggressive chase miniboss
+        if (e.y < 110) e.y += 120 * dt;
+        else {
+          const p = this.nearestPlayer(e.x, e.y);
+          if (p) {
+            const d = Math.hypot(p.x - e.x, p.y - e.y) || 1;
+            const speed = Math.min(200, 130 + w * 4);
+            e.x += ((p.x - e.x) / d) * speed * dt;
+            e.y += ((p.y - e.y) / d) * speed * 0.55 * dt;
+            e.y = clamp(e.y, 80, this.H * 0.55);
+          }
+          e.shootT -= dt;
+          if (e.shootT <= 0) {
+            e.shootT = 0.7;
+            if (p) {
+              for (let i = -2; i <= 2; i++) {
+                const a = Math.atan2(p.y - e.y, p.x - e.x) + i * 0.1;
+                const sp = Math.min(330, 230 + w * 6);
+                const b: Bullet = {
+                  x: e.x, y: e.y + 10, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+                  dmg: 1, r: 5, from: "e", color: ENEMY_COLORS.raider,
+                };
+                this.bullets.push(b);
+                if (this.net?.open) this.net.send({ t: "eshot", x: b.x, y: b.y, vx: b.vx, vy: b.vy, r: 5, color: ENEMY_COLORS.raider });
+              }
+              audio.eshoot();
+            }
+          }
+        }
+        break;
+      }
+      case "mortar": {
+        // Artillery miniboss — slow arcing bombs
+        if (e.y < 100) e.y += 75 * dt;
+        else {
+          e.x = this.W / 2 + Math.sin(e.t * 0.35) * Math.max(80, this.W / 2 - 160);
+          e.shootT -= dt;
+          if (e.shootT <= 0) {
+            e.shootT = 1.05;
+            const p = this.nearestPlayer(e.x, e.y);
+            for (let i = -3; i <= 3; i++) {
+              const targetX = (p ? p.x : this.W / 2) + i * 40;
+              const targetY = p ? p.y : this.H - 100;
+              const a = Math.atan2(targetY - e.y, targetX - e.x);
+              const sp = Math.min(240, 150 + w * 4);
+              const b: Bullet = {
+                x: e.x, y: e.y + 10, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+                dmg: 1, r: 8, from: "e", color: ENEMY_COLORS.mortar,
+              };
+              this.bullets.push(b);
+              if (this.net?.open) this.net.send({ t: "eshot", x: b.x, y: b.y, vx: b.vx, vy: b.vy, r: 8, color: ENEMY_COLORS.mortar });
+            }
+            audio.eshoot();
           }
         }
         break;
@@ -2017,22 +2249,28 @@ export class Engine {
     this.score += gained;
     const c = ENEMY_COLORS[e.type] ?? "#ff4d8f";
     this.pop(e.x, e.y, `+${gained}`, this.mult > 1 ? "#ffd23f" : "#eaf6ff");
-    this.explode(e.x, e.y, c, e.type === "boss" ? 3 : e.type === "tank" ? 1.6 : 1);
-    if (e.type === "boss") {
+    this.explode(e.x, e.y, c, isBossKind(e.type) ? 3 : isMinibossKind(e.type) ? 2.2 : e.type === "tank" ? 1.6 : 1);
+    if (isBossKind(e.type)) {
       this.shake = Math.min(32, this.shake + 20);
       this.flashWhite = 0.6;
-      this.dropPickup(e.x - 30, e.y, WEAPON_TYPES[Math.floor(Math.random() * WEAPON_TYPES.length)]);
-      this.dropPickup(e.x + 30, e.y, WEAPON_TYPES[Math.floor(Math.random() * WEAPON_TYPES.length)]);
-      this.pop(e.x, e.y - 40, "BOSS DOWN!", "#ff2d78", true);
+      // Bosses drop one guaranteed weapon only (was two)
+      this.dropPickup(e.x, e.y, WEAPON_TYPES[Math.floor(Math.random() * WEAPON_TYPES.length)]);
+      this.pop(e.x, e.y - 40, "BOSS DOWN!", ENEMY_COLORS[e.type] ?? "#ff2d78", true);
+    } else if (isMinibossKind(e.type)) {
+      this.shake = Math.min(24, this.shake + 12);
+      if (Math.random() < 0.55) {
+        this.dropPickup(e.x, e.y, WEAPON_TYPES[Math.floor(Math.random() * WEAPON_TYPES.length)]);
+      }
+      this.pop(e.x, e.y - 36, "MINI DOWN!", ENEMY_COLORS[e.type] ?? "#8338ec", true);
     } else {
-      // Weapon drops are independent systems: collecting one never replaces another.
-      const dropChance = Math.min(0.52, 0.32 + this.wave * 0.006);
+      // Lower drop rate — gear is scarce
+      const dropChance = Math.min(0.14, 0.06 + this.wave * 0.0025);
       if (Math.random() < dropChance) {
         const roll = Math.random();
         let type: PickType;
-        if (roll < 0.72) {
+        if (roll < 0.55) {
           type = WEAPON_TYPES[Math.floor(Math.random() * WEAPON_TYPES.length)];
-        } else if (roll < 0.88) type = "B";
+        } else if (roll < 0.8) type = "B";
         else type = "H";
         this.dropPickup(e.x, e.y, type);
       }
@@ -2444,12 +2682,10 @@ export class Engine {
           break;
         }
         case "miniboss": {
-          // miniboss - boss thu nhỏ
           const pul = 1 + Math.sin(this.now * 4) * 0.03;
           c.scale(pul, pul);
           c.fillStyle = body;
           c.beginPath();
-          // hình ngôi sao 5 cánh
           for (let i = 0; i < 10; i++) {
             const r = i % 2 === 0 ? 32 : 14;
             const a = (i / 10) * TAU - Math.PI / 2;
@@ -2463,7 +2699,6 @@ export class Engine {
           c.strokeStyle = hexA(col, 0.7);
           c.lineWidth = 2;
           c.stroke();
-          // lõi
           c.fillStyle = "#ff6b35";
           c.beginPath();
           c.arc(0, 0, 10, 0, TAU);
@@ -2471,11 +2706,104 @@ export class Engine {
           c.scale(1 / pul, 1 / pul);
           break;
         }
+        case "hydra": {
+          const pul = 1 + Math.sin(this.now * 5) * 0.04;
+          c.scale(pul, pul);
+          c.fillStyle = body;
+          // dual lobes
+          for (const side of [-1, 1] as const) {
+            c.beginPath();
+            c.ellipse(side * 28, 0, 26, 32, 0, 0, TAU);
+            c.fill();
+          }
+          c.beginPath();
+          c.ellipse(0, 4, 22, 28, 0, 0, TAU);
+          c.fill();
+          c.fillStyle = "#ffffff";
+          c.beginPath(); c.arc(-28, -6, 5, 0, TAU); c.fill();
+          c.beginPath(); c.arc(28, -6, 5, 0, TAU); c.fill();
+          c.fillStyle = "#1a0010";
+          c.beginPath(); c.arc(-28, -6, 2.2, 0, TAU); c.fill();
+          c.beginPath(); c.arc(28, -6, 2.2, 0, TAU); c.fill();
+          c.scale(1 / pul, 1 / pul);
+          break;
+        }
+        case "prism": {
+          c.rotate(this.now * 1.2);
+          c.fillStyle = body;
+          c.beginPath();
+          for (let i = 0; i < 3; i++) {
+            const a = (i / 3) * TAU - Math.PI / 2;
+            const x = Math.cos(a) * 42;
+            const y = Math.sin(a) * 42;
+            if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+          }
+          c.closePath();
+          c.fill();
+          c.strokeStyle = "#ffffff";
+          c.lineWidth = 2;
+          c.stroke();
+          c.fillStyle = "#eaffff";
+          c.beginPath(); c.arc(0, 0, 10, 0, TAU); c.fill();
+          c.rotate(-this.now * 1.2);
+          break;
+        }
+        case "serpent": {
+          c.fillStyle = body;
+          for (let i = 0; i < 5; i++) {
+            const ox = Math.sin(this.now * 3 + i) * 6;
+            c.beginPath();
+            c.ellipse(ox, -i * 14 + 20, 18 - i * 2, 12, 0, 0, TAU);
+            c.fill();
+          }
+          c.fillStyle = "#1a1400";
+          c.beginPath(); c.arc(0, 22, 6, 0, TAU); c.fill();
+          break;
+        }
+        case "fortress": {
+          c.fillStyle = body;
+          c.fillRect(-48, -28, 96, 56);
+          c.fillStyle = hexA("#0a0618", 0.55);
+          c.fillRect(-36, -16, 72, 32);
+          c.fillStyle = "#ffd23f";
+          c.fillRect(-6, 8, 12, 28);
+          c.beginPath(); c.arc(0, 0, 12, 0, TAU); c.fill();
+          break;
+        }
+        case "raider": {
+          c.rotate(Math.sin(e.t * 2) * 0.15);
+          c.fillStyle = body;
+          c.beginPath();
+          c.moveTo(0, 28);
+          c.lineTo(22, -18);
+          c.lineTo(0, -8);
+          c.lineTo(-22, -18);
+          c.closePath();
+          c.fill();
+          c.fillStyle = "#2a0c00";
+          c.beginPath(); c.arc(0, 0, 7, 0, TAU); c.fill();
+          break;
+        }
+        case "mortar": {
+          c.fillStyle = body;
+          c.beginPath();
+          c.moveTo(-30, 10);
+          c.lineTo(-18, -22);
+          c.lineTo(18, -22);
+          c.lineTo(30, 10);
+          c.lineTo(12, 22);
+          c.lineTo(-12, 22);
+          c.closePath();
+          c.fill();
+          c.fillStyle = "#0a1628";
+          c.fillRect(-5, -8, 10, 26);
+          break;
+        }
       }
       c.restore();
 
-      // thanh máu nhỏ
-      if (e.type !== "boss" && e.hp < e.maxHp && e.maxHp > 1) {
+      // thanh máu nhỏ (bosses use HUD bar)
+      if (!isBossKind(e.type) && e.hp < e.maxHp && e.maxHp > 1) {
         const wBar = 30;
         c.fillStyle = "rgba(5,6,15,0.7)";
         c.fillRect(e.x - wBar / 2, e.y - ENEMY_R[e.type] - 12, wBar, 4);
