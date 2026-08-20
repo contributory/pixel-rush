@@ -188,7 +188,10 @@ async def _remove_player(room_code: str, player_id: str):
 
     if not CONNECTED_ROOMS.get(room_code):
         CONNECTED_ROOMS.pop(room_code, None)
-        await publish_room_state(room_code, deleted=True)
+        if remaining:
+            current = ROOM_REGISTRY.get(room_code, {})
+            ROOM_REGISTRY[room_code] = {**current, "players": sort_players(remaining)}
+        await publish_room_state(room_code, deleted=not remaining)
         try:
             await hub.unbind_room(room_code)
         except Exception:
