@@ -1,7 +1,7 @@
 /* Audio system: background music + synthesized WebAudio sound effects. */
 
-/** Optional local BGM (public/music/pixel-rush.mp3). Falls back to chiptune if missing. */
-const LOCAL_SRC = "/music/pixel-rush.mp3";
+/** Local BGM from src folder. Falls back to chiptune if missing. */
+const LOCAL_SRC = "/src/Pixel Rush.mp3";
 
 export type BgmSource = "local" | "synth" | "none";
 
