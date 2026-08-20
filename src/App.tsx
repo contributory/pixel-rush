@@ -1024,9 +1024,7 @@ export default function App() {
           {hud?.muted || audio.muted
             ? "MUTED"
             : bgm.playing
-              ? bgm.source === "synth"
-                ? "CHIPTUNE"
-                : "BGM ON"
+              ? "BGM ON"
               : "TAP FOR MUSIC"}
         </span>
         {bgm.playing && !(hud?.muted ?? false) && <EqBars />}
